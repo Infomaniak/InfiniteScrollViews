@@ -120,6 +120,11 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     
     /// The style for transitions between pages.
     public let transitionStyle: NSPageController.TransitionStyle
+
+    /// The background color applied to the page controller and to the hosting controllers of its pages.
+    ///
+    /// Leave it to nil to keep the default backgrounds.
+    public var backgroundColor: NSColor?
     
     /// Creates a new instance of PagedInfiniteScrollView.
     /// - Parameters:
@@ -130,6 +135,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     ///   - shouldAnimateBetween: Function that will return a boolean indicating if there's need to animate the change between two given ChangeIndex, it also returns the direction of the animation. If the boolean is false (no need to animate), the direction of the animation won't be used. In most of the cases you won't want to animate if the two values are equals because it would animate barely everytime during the app use.
     ///   - indexesEqual: Function that should tell whether two ChangeIndex should be considered as equal (and so shouldn't change the controller if a transition is made between them).
     ///   - transitionStyle: The style for transitions between pages.
+    ///   - backgroundColor: The background color applied to the page controller and to the hosting controllers of its pages. Leave it to nil to keep the default backgrounds.
     public init(
         changeIndex: Binding<ChangeIndex>,
         content: @escaping (ChangeIndex) -> Content,
@@ -137,7 +143,8 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         shouldAnimateBetween: @escaping (_ oldIndex: ChangeIndex, _ newIndex: ChangeIndex) -> (Bool, NSPagedInfiniteScrollView<ChangeIndex>.SlideSide),
         indexesEqual: @escaping (ChangeIndex, ChangeIndex) -> Bool,
-        transitionStyle: NSPageController.TransitionStyle = .horizontalStrip
+        transitionStyle: NSPageController.TransitionStyle = .horizontalStrip,
+        backgroundColor: NSColor? = nil
     ) {
         self.changeIndex = changeIndex
         self.content = content
@@ -146,12 +153,19 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         self.shouldAnimateBetween = shouldAnimateBetween
         self.indexesEqual = indexesEqual
         self.transitionStyle = transitionStyle
+        self.backgroundColor = backgroundColor
     }
     
     public func makeNSViewController(context: Context) -> NSPagedInfiniteScrollView<ChangeIndex> {
         /// Creates the main view and set it in the ``NSPageViewController``.
+        let backgroundColor = self.backgroundColor
         let convertedClosure: (ChangeIndex) -> NSViewController = { changeIndex in
-            return NSHostingController(rootView: content(changeIndex))
+            let hostingController = NSHostingController(rootView: content(changeIndex))
+            if let backgroundColor {
+                hostingController.view.wantsLayer = true
+                hostingController.view.layer?.backgroundColor = backgroundColor.cgColor
+            }
+            return hostingController
         }
         let changeIndexNotification: (ChangeIndex) -> () = { changeIndex in
             DispatchQueue.main.async {
@@ -159,10 +173,14 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
             }
         }
         
-        return NSPagedInfiniteScrollView(content: convertedClosure, changeIndex: changeIndex.wrappedValue, changeIndexNotification: changeIndexNotification, increaseIndexAction: increaseIndexAction, decreaseIndexAction: decreaseIndexAction, shouldAnimateBetween: shouldAnimateBetween, indexesEqual: indexesEqual, transitionStyle: transitionStyle)
+        return NSPagedInfiniteScrollView(content: convertedClosure, changeIndex: changeIndex.wrappedValue, changeIndexNotification: changeIndexNotification, increaseIndexAction: increaseIndexAction, decreaseIndexAction: decreaseIndexAction, shouldAnimateBetween: shouldAnimateBetween, indexesEqual: indexesEqual, transitionStyle: transitionStyle, backgroundColor: backgroundColor)
     }
     
     public func updateNSViewController(_ nsViewController: NSPagedInfiniteScrollView<ChangeIndex>, context: Context) {
+        if let backgroundColor {
+            nsViewController.view.wantsLayer = true
+            nsViewController.view.layer?.backgroundColor = backgroundColor.cgColor
+        }
         nsViewController.changeCurrentIndex(to: changeIndex.wrappedValue)
     }
     #else
@@ -183,6 +201,11 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     /// The orientation of the page-by-page navigation.
     public let navigationOrientation: UIPageViewController.NavigationOrientation
     
+    /// The background color applied to the page view controller and to the hosting controllers of its pages.
+    ///
+    /// Leave it to nil to keep the default backgrounds.
+    public var backgroundColor: UIColor?
+    
     /// Creates a new instance of PagedInfiniteScrollView.
     /// - Parameters:
     ///   - changeIndex: Data that will be passed to draw the view and get its frame.
@@ -193,6 +216,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     ///   - shouldAnimateBetween: Function that will return a boolean indicating if there's need to animate the change between two given ChangeIndex, it also returns the direction of the animation. If the boolean is false (no need to animate), the direction of the animation won't be used. In most of the cases you won't want to animate if the two values are equals because it would animate barely everytime during the app use.
     ///   - transitionStyle: The style for transitions between pages.
     ///   - navigationOrientation: The orientation of the page-by-page navigation.
+    ///   - backgroundColor: The background color applied to the page view controller and to the hosting controllers of its pages. Leave it to nil to keep the default backgrounds.
     public init(
         changeIndex: Binding<ChangeIndex>,
         content: @escaping (ChangeIndex) -> Content,
@@ -201,7 +225,8 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         areIndexesEqualAction: @escaping (ChangeIndex, ChangeIndex) -> Bool,
         shouldAnimateBetween: @escaping (ChangeIndex, ChangeIndex) -> (Bool, UIPageViewController.NavigationDirection),
         transitionStyle: UIPageViewController.TransitionStyle,
-        navigationOrientation: UIPageViewController.NavigationOrientation
+        navigationOrientation: UIPageViewController.NavigationOrientation,
+        backgroundColor: UIColor? = nil
     ) {
         self.changeIndex = changeIndex
         self.content = content
@@ -211,6 +236,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         self.shouldAnimateBetween = shouldAnimateBetween
         self.transitionStyle = transitionStyle
         self.navigationOrientation = navigationOrientation
+        self.backgroundColor = backgroundColor
     }
     
     /// Creates a new instance of PagedInfiniteScrollView.
@@ -244,22 +270,34 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     
     public func makeUIViewController(context: Context) -> UIPageViewController {
         /// Creates the main view and set it in the ``UIPageViewController``.
+        let backgroundColor = self.backgroundColor
         let convertedClosure: (ChangeIndex) -> UIViewController = { changeIndex in
-            return UIHostingController(rootView: content(changeIndex))
+            let hostingController = UIHostingController(rootView: content(changeIndex))
+            if let backgroundColor {
+                hostingController.view.backgroundColor = backgroundColor
+            }
+            return hostingController
         }
         let changeIndexNotification: (ChangeIndex) -> () = { changeIndex in
             self.changeIndex.wrappedValue = changeIndex
         }
-        let pageViewController = UIPagedInfiniteScrollView(content: convertedClosure, changeIndex: changeIndex.wrappedValue, changeIndexNotification: changeIndexNotification, increaseIndexAction: increaseIndexAction, decreaseIndexAction: decreaseIndexAction, transitionStyle: transitionStyle, navigationOrientation: navigationOrientation)
+        let pageViewController = UIPagedInfiniteScrollView(content: convertedClosure, changeIndex: changeIndex.wrappedValue, changeIndexNotification: changeIndexNotification, increaseIndexAction: increaseIndexAction, decreaseIndexAction: decreaseIndexAction, transitionStyle: transitionStyle, navigationOrientation: navigationOrientation, backgroundColor: backgroundColor)
         
         let initialViewController = UIHostingController(rootView: content(changeIndex.wrappedValue))
         initialViewController.storedChangeIndex = changeIndex.wrappedValue
+        if let backgroundColor {
+            initialViewController.view.backgroundColor = backgroundColor
+        }
         pageViewController.setViewControllers([initialViewController], direction: .forward, animated: false, completion: nil)
         
         return pageViewController
     }
     
     public func updateUIViewController(_ uiViewController: UIPageViewController, context: Context) {
+        if let backgroundColor {
+            uiViewController.view.backgroundColor = backgroundColor
+        }
+        
         /// Check if the view should update and if it should then it will be.
         guard let currentView = uiViewController.viewControllers?.first, let currentIndex = currentView.storedChangeIndex as? ChangeIndex else {
             return
@@ -269,6 +307,9 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
             let shouldAnimate: (Bool, UIPageViewController.NavigationDirection) = shouldAnimateBetween(changeIndex.wrappedValue, currentIndex)
             let initialViewController = UIHostingController(rootView: content(changeIndex.wrappedValue))
             initialViewController.storedChangeIndex = changeIndex.wrappedValue
+            if let backgroundColor {
+                initialViewController.view.backgroundColor = backgroundColor
+            }
             uiViewController.setViewControllers([initialViewController], direction: shouldAnimate.1, animated: shouldAnimate.0, completion: nil)
         }
     }
@@ -285,6 +326,7 @@ extension PagedInfiniteScrollView where ChangeIndex: Equatable {
     ///   - shouldAnimateBetween: Function that will return a boolean indicating if there's need to animate the change between two given ChangeIndex, it also returns the direction of the animation. If the boolean is false (no need to animate), the direction of the animation won't be used. In most of the cases you won't want to animate if the two values are equals because it would animate barely everytime during the app use.
     ///   - transitionStyle: The style for transitions between pages.
     ///   - navigationOrientation: The orientation of the page-by-page navigation.
+    ///   - backgroundColor: The background color applied to the page view controller and to the hosting controllers of its pages. Leave it to nil to keep the default backgrounds.
     public init(
         changeIndex: Binding<ChangeIndex>,
         content: @escaping (ChangeIndex) -> Content,
@@ -292,7 +334,8 @@ extension PagedInfiniteScrollView where ChangeIndex: Equatable {
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         shouldAnimateBetween: @escaping (ChangeIndex, ChangeIndex) -> (Bool, UIPageViewController.NavigationDirection),
         transitionStyle: UIPageViewController.TransitionStyle,
-        navigationOrientation: UIPageViewController.NavigationOrientation
+        navigationOrientation: UIPageViewController.NavigationOrientation,
+        backgroundColor: UIColor? = nil
     ) {
         self.changeIndex = changeIndex
         self.content = content
@@ -302,6 +345,7 @@ extension PagedInfiniteScrollView where ChangeIndex: Equatable {
         self.shouldAnimateBetween = shouldAnimateBetween
         self.transitionStyle = transitionStyle
         self.navigationOrientation = navigationOrientation
+        self.backgroundColor = backgroundColor
     }
 }
 #endif
@@ -415,6 +459,7 @@ public class NSPagedInfiniteScrollView<ChangeIndex>: NSPageController, NSPageCon
     ///   - shouldAnimateBetween: Function that will return a boolean indicating if there's need to animate the change between two given ChangeIndex, it also returns the direction of the animation. If the boolean is false (no need to animate), the direction of the animation won't be used. In most of the cases you won't want to animate if the two values are equals because it would animate barely everytime during the app use.
     ///   - indexesEqual: Function that should tell whether two ChangeIndex should be considered as equal (and so shouldn't change the controller if a transition is made between them).
     ///   - transitionStyle: The style for transitions between pages.
+    ///   - backgroundColor: The background color applied to the page controller's view. Leave it to nil to keep the default background.
     public init(
         content: @escaping (ChangeIndex) -> NSViewController,
         changeIndex: ChangeIndex,
@@ -423,7 +468,8 @@ public class NSPagedInfiniteScrollView<ChangeIndex>: NSPageController, NSPageCon
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         shouldAnimateBetween: @escaping (ChangeIndex, ChangeIndex) -> (Bool, SlideSide),
         indexesEqual: @escaping (ChangeIndex, ChangeIndex) -> Bool,
-        transitionStyle: NSPageController.TransitionStyle = .horizontalStrip
+        transitionStyle: NSPageController.TransitionStyle = .horizontalStrip,
+        backgroundColor: NSColor? = nil
     ) {
         self.content = content
         self.changeIndex = changeIndex
@@ -434,6 +480,10 @@ public class NSPagedInfiniteScrollView<ChangeIndex>: NSPageController, NSPageCon
         self.indexesEqual = indexesEqual
         super.init(nibName: nil, bundle: nil)
         self.transitionStyle = transitionStyle
+        if let backgroundColor {
+            view.wantsLayer = true
+            view.layer?.backgroundColor = backgroundColor.cgColor
+        }
     }
     
     required init?(coder: NSCoder) {
@@ -718,6 +768,7 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     ///   - decreaseIndexAction: Function that get the ChangeIndex before another. Should return nil if there is no more content to display (end of the PagedScrollView at the bottom/right). See definition in class to learn more.
     ///   - transitionStyle: The style for transitions between pages.
     ///   - navigationOrientation: The orientation of the page-by-page navigation.
+    ///   - backgroundColor: The background color applied to the page view controller's view. Leave it to nil to keep the default background.
     ///
     ///  When you initialize the first view of the PagedInfiniteScrollView, don't forget to set the storedChangeIndex on your UIViewController like this:
     ///  ```swift
@@ -733,7 +784,8 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
         increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         transitionStyle: UIPageViewController.TransitionStyle,
-        navigationOrientation: UIPageViewController.NavigationOrientation
+        navigationOrientation: UIPageViewController.NavigationOrientation,
+        backgroundColor: UIColor? = nil
     ) {
         let convertedClosure: (ChangeIndex) -> UIViewController = { changeIndex in
             let controller = content(changeIndex)
@@ -748,6 +800,9 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
         super.init(transitionStyle: transitionStyle, navigationOrientation: navigationOrientation)
         self.dataSource = self
         self.delegate = self
+        if let backgroundColor {
+            view.backgroundColor = backgroundColor
+        }
     }
     
     @available(*, unavailable)
