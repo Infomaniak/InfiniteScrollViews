@@ -183,6 +183,19 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         }
         nsViewController.changeCurrentIndex(to: changeIndex.wrappedValue)
     }
+
+    @available(macOS 13.0, *)
+    public func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: NSPagedInfiniteScrollView<ChangeIndex>, context: Context) -> CGSize? {
+        guard let hostingController = nsViewController.selectedViewController as? NSHostingController<Content> else {
+            return nil
+        }
+
+        let proposedSize = CGSize(
+            width: proposal.width ?? .greatestFiniteMagnitude,
+            height: proposal.height ?? .greatestFiniteMagnitude
+        )
+        return hostingController.sizeThatFits(in: proposedSize)
+    }
     #else
     
     /// Function that will return the result of the comparaison of two indexes. Can be ommited when `ChangeIndex` is `Equatable`.
@@ -312,6 +325,19 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
             }
             uiViewController.setViewControllers([initialViewController], direction: shouldAnimate.1, animated: shouldAnimate.0, completion: nil)
         }
+    }
+
+    @available(iOS 16.0, tvOS 16.0, *)
+    public func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: UIPageViewController, context: Context) -> CGSize? {
+        guard let hostingController = uiViewController.viewControllers?.first as? UIHostingController<Content> else {
+            return nil
+        }
+
+        let proposedSize = CGSize(
+            width: proposal.width ?? .greatestFiniteMagnitude,
+            height: proposal.height ?? .greatestFiniteMagnitude
+        )
+        return hostingController.sizeThatFits(in: proposedSize)
     }
     #endif
 }
