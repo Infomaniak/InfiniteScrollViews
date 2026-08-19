@@ -138,7 +138,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     ///   - backgroundColor: The background color applied to the page controller and to the hosting controllers of its pages. Leave it to nil to keep the default backgrounds.
     public init(
         changeIndex: Binding<ChangeIndex>,
-        content: @escaping (ChangeIndex) -> Content,
+        @ViewBuilder content: @escaping (ChangeIndex) -> Content,
         increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         shouldAnimateBetween: @escaping (_ oldIndex: ChangeIndex, _ newIndex: ChangeIndex) -> (Bool, NSPagedInfiniteScrollView<ChangeIndex>.SlideSide),
@@ -232,7 +232,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     ///   - backgroundColor: The background color applied to the page view controller and to the hosting controllers of its pages. Leave it to nil to keep the default backgrounds.
     public init(
         changeIndex: Binding<ChangeIndex>,
-        content: @escaping (ChangeIndex) -> Content,
+        @ViewBuilder content: @escaping (ChangeIndex) -> Content,
         increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         areIndexesEqualAction: @escaping (ChangeIndex, ChangeIndex) -> Bool,
@@ -264,7 +264,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     @available(*, deprecated, message: "Please provide a non-optional areIndexesEqualAction, this will be an error in a future version of InfiniteScrollViews.")
     public init(
         changeIndex: Binding<ChangeIndex>,
-        content: @escaping (ChangeIndex) -> Content,
+        @ViewBuilder content: @escaping (ChangeIndex) -> Content,
         increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         shouldAnimateBetween: @escaping (ChangeIndex, ChangeIndex) -> (Bool, UIPageViewController.NavigationDirection),
@@ -355,7 +355,7 @@ extension PagedInfiniteScrollView where ChangeIndex: Equatable {
     ///   - backgroundColor: The background color applied to the page view controller and to the hosting controllers of its pages. Leave it to nil to keep the default backgrounds.
     public init(
         changeIndex: Binding<ChangeIndex>,
-        content: @escaping (ChangeIndex) -> Content,
+        @ViewBuilder content: @escaping (ChangeIndex) -> Content,
         increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         shouldAnimateBetween: @escaping (ChangeIndex, ChangeIndex) -> (Bool, UIPageViewController.NavigationDirection),
