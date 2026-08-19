@@ -177,6 +177,9 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     }
     
     public func updateNSViewController(_ nsViewController: NSPagedInfiniteScrollView<ChangeIndex>, context: Context) {
+        nsViewController.increaseIndexAction = increaseIndexAction
+        nsViewController.decreaseIndexAction = decreaseIndexAction
+
         if let backgroundColor {
             nsViewController.view.wantsLayer = true
             nsViewController.view.layer?.backgroundColor = backgroundColor.cgColor
@@ -281,7 +284,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         self.navigationOrientation = navigationOrientation
     }
     
-    public func makeUIViewController(context: Context) -> UIPageViewController {
+    public func makeUIViewController(context: Context) -> UIPagedInfiniteScrollView<ChangeIndex> {
         /// Creates the main view and set it in the ``UIPageViewController``.
         let backgroundColor = self.backgroundColor
         let convertedClosure: (ChangeIndex) -> UIViewController = { changeIndex in
@@ -306,7 +309,10 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         return pageViewController
     }
     
-    public func updateUIViewController(_ uiViewController: UIPageViewController, context: Context) {
+    public func updateUIViewController(_ uiViewController: UIPagedInfiniteScrollView<ChangeIndex>, context: Context) {
+        uiViewController.increaseIndexAction = increaseIndexAction
+        uiViewController.decreaseIndexAction = decreaseIndexAction
+
         if let backgroundColor {
             uiViewController.view.backgroundColor = backgroundColor
         }
@@ -433,8 +439,8 @@ public class NSPagedInfiniteScrollView<ChangeIndex>: NSPageController, NSPageCon
     ///     return currentDate.addingXDays(x: 30)
     /// }
     /// ```
-    private let increaseIndexAction: (ChangeIndex) -> ChangeIndex?
-    
+    var increaseIndexAction: (ChangeIndex) -> ChangeIndex?
+
     /// Function that get the ChangeIndex before another.
     ///
     /// Should return nil if there is no more content to display (end of the PagedScrollView at the top/left).
@@ -463,7 +469,7 @@ public class NSPagedInfiniteScrollView<ChangeIndex>: NSPageController, NSPageCon
     ///     return currentDate.addingXDays(x: -30)
     /// }
     /// ```
-    private let decreaseIndexAction: (ChangeIndex) -> ChangeIndex?
+    var decreaseIndexAction: (ChangeIndex) -> ChangeIndex?
     
     /// Function that will return a boolean indicating if there's need to animate the change between two given ChangeIndex, it also returns the direction of the animation. If the boolean is false (no need to animate), the direction of the animation won't be used. In most of the cases you won't want to animate if the two values are equals because it would animate barely everytime during the app use.
     private let shouldAnimateBetween: (_ oldIndex: ChangeIndex, _ newIndex: ChangeIndex) -> (shouldAnimate: Bool, side: SlideSide)
@@ -753,8 +759,8 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     ///     return currentDate.addingXDays(x: 30)
     /// }
     /// ```
-    private let increaseIndexAction: (ChangeIndex) -> ChangeIndex?
-    
+    var increaseIndexAction: (ChangeIndex) -> ChangeIndex?
+
     /// Function that get the ChangeIndex before another.
     ///
     /// Should return nil if there is no more content to display (end of the PagedScrollView at the top/left).
@@ -783,8 +789,8 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     ///     return currentDate.addingXDays(x: -30)
     /// }
     /// ```
-    private let decreaseIndexAction: (ChangeIndex) -> ChangeIndex?
-    
+    var decreaseIndexAction: (ChangeIndex) -> ChangeIndex?
+
     /// Creates an instance of UIPagedInfiniteScrollView.
     /// - Parameters:
     ///   - content: Function called to get the content to display for a particular ChangeIndex.
