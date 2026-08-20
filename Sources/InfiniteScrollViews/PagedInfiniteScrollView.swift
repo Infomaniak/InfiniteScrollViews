@@ -38,6 +38,83 @@ import UIKit
 #if canImport(SwiftUI)
 import SwiftUI
 
+private protocol CurrentIndexProviding {
+    var erasedCurrentIndex: Any { get }
+}
+
+#if os(macOS)
+private final class HostingViewController<Content: View, ChangeIndex>: NSHostingController<Content>, CurrentIndexProviding {
+    let currentIndex: ChangeIndex
+
+    var erasedCurrentIndex: Any {
+        currentIndex
+    }
+
+    init(rootView: Content, currentIndex: ChangeIndex) {
+        self.currentIndex = currentIndex
+        super.init(rootView: rootView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+#else
+private final class HostingViewController<Content: View, ChangeIndex>: UIHostingController<Content>, CurrentIndexProviding {
+    let currentIndex: ChangeIndex
+
+    var erasedCurrentIndex: Any {
+        currentIndex
+    }
+
+    init(rootView: Content, currentIndex: ChangeIndex) {
+        self.currentIndex = currentIndex
+        super.init(rootView: rootView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+private final class CurrentIndexViewController<ChangeIndex>: UIViewController, CurrentIndexProviding {
+    let currentIndex: ChangeIndex
+    private let contentViewController: UIViewController
+
+    var erasedCurrentIndex: Any {
+        currentIndex
+    }
+
+    init(contentViewController: UIViewController, currentIndex: ChangeIndex) {
+        self.contentViewController = contentViewController
+        self.currentIndex = currentIndex
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        addChild(contentViewController)
+        contentViewController.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(contentViewController.view)
+        NSLayoutConstraint.activate([
+            contentViewController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            contentViewController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            contentViewController.view.topAnchor.constraint(equalTo: view.topAnchor),
+            contentViewController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        contentViewController.didMove(toParent: self)
+    }
+}
+#endif
+
 /// SwiftUI PagedInfiniteScrollView component.
 ///
 /// Generic types:
@@ -160,7 +237,10 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         /// Creates the main view and set it in the ``NSPageViewController``.
         let backgroundColor = self.backgroundColor
         let convertedClosure: (ChangeIndex) -> NSViewController = { changeIndex in
-            let hostingController = NSHostingController(rootView: content(changeIndex))
+            let hostingController = HostingViewController(
+                rootView: content(changeIndex),
+                currentIndex: changeIndex
+            )
             if let backgroundColor {
                 hostingController.view.wantsLayer = true
                 hostingController.view.layer?.backgroundColor = backgroundColor.cgColor
@@ -189,7 +269,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
 
     @available(macOS 13.0, *)
     public func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: NSPagedInfiniteScrollView<ChangeIndex>, context: Context) -> CGSize? {
-        guard let hostingController = nsViewController.selectedViewController as? NSHostingController<Content> else {
+        guard let hostingController = nsViewController.selectedViewController as? HostingViewController<Content, ChangeIndex> else {
             return nil
         }
 
@@ -288,7 +368,10 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         /// Creates the main view and set it in the ``UIPageViewController``.
         let backgroundColor = self.backgroundColor
         let convertedClosure: (ChangeIndex) -> UIViewController = { changeIndex in
-            let hostingController = UIHostingController(rootView: content(changeIndex))
+            let hostingController = HostingViewController(
+                rootView: content(changeIndex),
+                currentIndex: changeIndex
+            )
             if let backgroundColor {
                 hostingController.view.backgroundColor = backgroundColor
             }
@@ -298,13 +381,6 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
             self.changeIndex.wrappedValue = changeIndex
         }
         let pageViewController = UIPagedInfiniteScrollView(content: convertedClosure, changeIndex: changeIndex.wrappedValue, changeIndexNotification: changeIndexNotification, increaseIndexAction: increaseIndexAction, decreaseIndexAction: decreaseIndexAction, transitionStyle: transitionStyle, navigationOrientation: navigationOrientation, backgroundColor: backgroundColor)
-        
-        let initialViewController = UIHostingController(rootView: content(changeIndex.wrappedValue))
-        initialViewController.storedChangeIndex = changeIndex.wrappedValue
-        if let backgroundColor {
-            initialViewController.view.backgroundColor = backgroundColor
-        }
-        pageViewController.setViewControllers([initialViewController], direction: .forward, animated: false, completion: nil)
         
         return pageViewController
     }
@@ -318,14 +394,17 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
         }
         
         /// Check if the view should update and if it should then it will be.
-        guard let currentView = uiViewController.viewControllers?.first, let currentIndex = currentView.storedChangeIndex as? ChangeIndex else {
+        guard let currentView = uiViewController.viewControllers?.first as? CurrentIndexProviding,
+              let currentIndex = currentView.erasedCurrentIndex as? ChangeIndex else {
             return
         }
         
         if !self.areIndexesEqualAction(currentIndex, changeIndex.wrappedValue) {
             let shouldAnimate: (Bool, UIPageViewController.NavigationDirection) = shouldAnimateBetween(changeIndex.wrappedValue, currentIndex)
-            let initialViewController = UIHostingController(rootView: content(changeIndex.wrappedValue))
-            initialViewController.storedChangeIndex = changeIndex.wrappedValue
+            let initialViewController = HostingViewController(
+                rootView: content(changeIndex.wrappedValue),
+                currentIndex: changeIndex.wrappedValue
+            )
             if let backgroundColor {
                 initialViewController.view.backgroundColor = backgroundColor
             }
@@ -802,13 +881,6 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     ///   - navigationOrientation: The orientation of the page-by-page navigation.
     ///   - backgroundColor: The background color applied to the page view controller's view. Leave it to nil to keep the default background.
     ///
-    ///  When you initialize the first view of the PagedInfiniteScrollView, don't forget to set the storedChangeIndex on your UIViewController like this:
-    ///  ```swift
-    ///  let myFirstChangeIndex: ChangeIndex = ...
-    ///  let myViewController: UIViewController = ...
-    ///  myViewController.storedChangeIndex = myFirstChangeIndex
-    ///  ```
-    ///  also make sure that the value you'll store in storedChangeIndex is of the type of ChangeIndex, and not `Binding<ChangingIndex>` for example, otherwise the PagedInfiniteScrollView just won't work.
     public init(
         content: @escaping (ChangeIndex) -> UIViewController,
         changeIndex: ChangeIndex,
@@ -821,8 +893,10 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     ) {
         let convertedClosure: (ChangeIndex) -> UIViewController = { changeIndex in
             let controller = content(changeIndex)
-            controller.storedChangeIndex = changeIndex
-            return controller
+            if controller is CurrentIndexProviding {
+                return controller
+            }
+            return CurrentIndexViewController(contentViewController: controller, currentIndex: changeIndex)
         }
         self.content = convertedClosure
         self.changeIndex = changeIndex
@@ -835,6 +909,11 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
         if let backgroundColor {
             view.backgroundColor = backgroundColor
         }
+        setViewControllers(
+            [convertedClosure(changeIndex)],
+            direction: .forward,
+            animated: false
+        )
     }
     
     @available(*, unavailable)
@@ -843,7 +922,8 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     }
     
     public func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
-        guard let currentIndex = viewController.storedChangeIndex as? ChangeIndex else {
+        guard let indexedViewController = viewController as? CurrentIndexProviding,
+              let currentIndex = indexedViewController.erasedCurrentIndex as? ChangeIndex else {
             return nil /// Stops scroll.
         }
         
@@ -855,7 +935,8 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     }
     
     public func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
-        guard let currentIndex = viewController.storedChangeIndex as? ChangeIndex else {
+        guard let indexedViewController = viewController as? CurrentIndexProviding,
+              let currentIndex = indexedViewController.erasedCurrentIndex as? ChangeIndex else {
             return nil /// Stops scroll.
         }
 
@@ -869,29 +950,9 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     public func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
         /// Check if the transition was successful and update the changeIndex of the class.
         if completed,
-           let currentViewController = pageViewController.viewControllers?.first,
-           let currentIndex = currentViewController.storedChangeIndex as? ChangeIndex {
+           let currentViewController = pageViewController.viewControllers?.first as? CurrentIndexProviding,
+           let currentIndex = currentViewController.erasedCurrentIndex as? ChangeIndex {
             changeIndex = currentIndex
-        }
-    }
-}
-
-/// To store the changeIndex in the ViewController
-///
-/// From: https://tetontech.wordpress.com/2015/11/12/adding-custom-class-properties-with-swift-extensions/
-public extension UIViewController {
-    private struct ChangeIndex {
-        static var changeIndex: Any? = nil
-    }
-    
-    var storedChangeIndex: Any? {
-        get {
-            return objc_getAssociatedObject(self, &ChangeIndex.changeIndex) as Any?
-        }
-        set {
-            if let unwrappedValue = newValue {
-                objc_setAssociatedObject(self, &ChangeIndex.changeIndex, unwrappedValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-            }
         }
     }
 }
