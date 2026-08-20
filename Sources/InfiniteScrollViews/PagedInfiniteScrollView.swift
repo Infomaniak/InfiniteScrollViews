@@ -334,7 +334,7 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
     }
 
     @available(iOS 16.0, tvOS 16.0, *)
-    public func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: UIPageViewController, context: Context) -> CGSize? {
+    public func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: UIPagedInfiniteScrollView<ChangeIndex>, context: Context) -> CGSize? {
         guard let hostingController = uiViewController.viewControllers?.first as? UIHostingController<Content> else {
             return nil
         }
