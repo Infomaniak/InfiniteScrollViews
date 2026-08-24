@@ -20,26 +20,29 @@ You want to draw an "infinite" calendar component like the one in the base Calen
    InfiniteScrollView(
         frame: CGRect,
         changeIndex: ChangeIndex,
-        content: @escaping (ChangeIndex) -> Content,
-        contentFrame: @escaping (ChangeIndex) -> CGRect,
         increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
         orientation: UIInfiniteScrollView<ChangeIndex>.Orientation, // or NSInfiniteScrollView<ChangeIndex>.Orientation
         refreshAction: ((@escaping () -> Void) -> ())? = nil,
         spacing: CGFloat = 0,
+        contentMultiplier: CGFloat = 6,
         updateBinding: Binding<Bool>? = nil
-   )
+   ) { changeIndex in
+       Content
+   }
    ```
    - frame: the frame of the InfiniteScrollView.
    - changeIndex: the first index that will be used to draw the view.
-   - content: the query from the InfiniteScrollView to draw a View from a ChangeIndex.
-   - contentFrame: the query from the InfiniteScrollView to get the frame of the View from the content query (They are separated so you can directly declare the View in the closure).
    - increaseIndexAction: the query from the InfiniteScrollView to get the value after a certain ChangeIndex (recursive logic).
    - decreaseIndexAction: the query from the InfiniteScrollView to get the value before a certain ChangeIndex (recursive logic).
    - orientation: the orientation of the InfiniteScrollView.
    - refreshAction: action to do when the user pull the InfiniteScrollView to the top to refresh the content, should be nil if there is no need to refresh anything. Gives an action that must be used in order for refresh to end.
    - spacing: space between the views.
+   - contentMultiplier: number used to multiply the scrollable view dimension. Increase it to support higher scrolling speeds.
    - updateBinding: boolean that can be changed if the InfiniteScrollView's content needs to be updated.
+   - content: a ViewBuilder used to draw a self-sized View from a ChangeIndex.
+
+   `InfiniteScrollView`, `UIInfiniteScrollView`, and `NSInfiniteScrollView` resolve each item's size from the generated view. Content with no intrinsic or fitting size must define one itself, for example with SwiftUI's `.frame(width:height:)` or the corresponding native sizing APIs.
 2. Let's see how content, increaseIndexAction and decreaseIndexAction work:
    1. For our MonthView we need to provide a Date so that it will extract the month to display.
       It could be declared like this:
