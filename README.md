@@ -68,6 +68,43 @@ You want to draw an "infinite" calendar component like the one in the base Calen
       ```
 Other examples can be found in [InfiniteScrollViewsExample](https://github.com/b5i/InfiniteScrollViewsExample).
 
+### Scrolling to an index
+
+Wrap the view in `InfiniteScrollViewReader` to jump directly to an index without generating the intermediate views:
+
+```swift
+InfiniteScrollViewReader { proxy in
+    VStack {
+        InfiniteScrollView(
+            changeIndex: 0,
+            increaseIndexAction: { $0 + 1 },
+            decreaseIndexAction: { $0 - 1 },
+            orientation: .vertical
+        ) { index in
+            Row(index: index)
+        }
+
+        Button("Go to 1,000") {
+            withAnimation {
+                proxy.scrollTo(1_000, anchor: .center)
+            }
+        }
+    }
+}
+```
+
+The anchor can be `.leading` (top/left), `.center`, or `.trailing` (bottom/right). It defaults to `nil`: if the item is fully contained in the viewport, nothing happens; otherwise it is placed at the leading edge. Wrapping `scrollTo` in `withAnimation` uses a platform-native slide transition; without it, the jump is immediate. Requests made before the underlying view is ready are applied when it connects.
+
+When `ChangeIndex` conforms to `Equatable`, a request is ignored if that index is already at the requested anchor. For a non-`Equatable` index, provide the `indexesEqual` closure to `InfiniteScrollView` to enable the same behavior.
+
+UIKit and AppKit callers can request the same transition explicitly:
+
+```swift
+scrollView.scroll(to: index, anchor: .center, animated: true)
+```
+
+Native initializers also accept an optional `indexesEqual` closure for redundant-scroll detection.
+
 ## SwiftUI
 ### InfiniteScrollView
 The infinite equivalent of the ScrollView component in SwiftUI.

@@ -29,6 +29,38 @@ SOFTWARE.
 //
 // Work inspired by https://developer.apple.com/library/archive/samplecode/StreetScroller/Introduction/Intro.html#//apple_ref/doc/uid/DTS40011102-Intro-DontLinkElementID_2
 
+import CoreGraphics
+
+/// The viewport position used for a programmatic scroll.
+public enum InfiniteScrollViewAnchor: Equatable {
+    /// Positions the item at the top or left edge.
+    case leading
+    /// Positions the item in the center.
+    case center
+    /// Positions the item at the bottom or right edge.
+    case trailing
+
+    fileprivate var unitOffset: Double {
+        switch self {
+        case .leading:
+            return 0
+        case .center:
+            return 0.5
+        case .trailing:
+            return 1
+        }
+    }
+}
+
+private func anchoredOrigin(
+    minimum: CGFloat,
+    maximum: CGFloat,
+    itemLength: CGFloat,
+    anchor: InfiniteScrollViewAnchor
+) -> CGFloat {
+    minimum + CGFloat(anchor.unitOffset) * (maximum - minimum - itemLength)
+}
+
 #if canImport(SwiftUI)
 import SwiftUI
 
@@ -94,6 +126,113 @@ private final class SelfSizingHostingView<Content: View>: UIView, InfiniteScroll
 }
 #endif
 
+enum InfiniteScrollViewProxyDelivery {
+    case handled
+    case incompatible
+}
+
+final class InfiniteScrollViewProxyCoordinator {
+    private struct Request {
+        let index: Any
+        let anchor: InfiniteScrollViewAnchor?
+    }
+
+    private var pendingRequest: Request?
+
+    func connect(
+        animated: Bool,
+        scrollAction: (Any, InfiniteScrollViewAnchor?, Bool) -> InfiniteScrollViewProxyDelivery
+    ) {
+        guard let pendingRequest = pendingRequest else { return }
+
+        switch scrollAction(pendingRequest.index, pendingRequest.anchor, animated) {
+        case .handled:
+            self.pendingRequest = nil
+        case .incompatible:
+            break
+        }
+    }
+
+    func scrollTo<ChangeIndex>(
+        _ index: ChangeIndex,
+        anchor: InfiniteScrollViewAnchor?
+    ) {
+        pendingRequest = Request(index: index as Any, anchor: anchor)
+    }
+}
+
+private struct InfiniteScrollViewProxyCoordinatorKey: EnvironmentKey {
+    static let defaultValue: InfiniteScrollViewProxyCoordinator? = nil
+}
+
+private struct InfiniteScrollViewProxyRequestVersionKey: EnvironmentKey {
+    static let defaultValue = 0
+}
+
+private extension EnvironmentValues {
+    var infiniteScrollViewProxyCoordinator: InfiniteScrollViewProxyCoordinator? {
+        get { self[InfiniteScrollViewProxyCoordinatorKey.self] }
+        set { self[InfiniteScrollViewProxyCoordinatorKey.self] = newValue }
+    }
+
+    var infiniteScrollViewProxyRequestVersion: Int {
+        get { self[InfiniteScrollViewProxyRequestVersionKey.self] }
+        set { self[InfiniteScrollViewProxyRequestVersionKey.self] = newValue }
+    }
+}
+
+/// A proxy that allows an ``InfiniteScrollViewReader`` to scroll its infinite scroll view.
+@available(iOS 13.0, macOS 10.15, tvOS 13.0, watchOS 6.0, *)
+public struct InfiniteScrollViewProxy {
+    private let coordinator: InfiniteScrollViewProxyCoordinator
+    private let requestUpdate: () -> Void
+
+    init(
+        coordinator: InfiniteScrollViewProxyCoordinator,
+        requestUpdate: @escaping () -> Void = {}
+    ) {
+        self.coordinator = coordinator
+        self.requestUpdate = requestUpdate
+    }
+
+    /// Scrolls the reader's infinite scroll view to an index.
+    ///
+    /// Wrap this call in `withAnimation` to animate the transition.
+    /// - Parameters:
+    ///   - index: The index to display.
+    ///   - anchor: The position of the item in the viewport. When nil, scrolling only occurs if the item is not visible.
+    public func scrollTo<ChangeIndex>(
+        _ index: ChangeIndex,
+        anchor: InfiniteScrollViewAnchor? = nil
+    ) {
+        coordinator.scrollTo(index, anchor: anchor)
+        requestUpdate()
+    }
+}
+
+/// A view that provides an ``InfiniteScrollViewProxy`` for programmatic scrolling.
+@available(iOS 13.0, macOS 10.15, tvOS 13.0, watchOS 6.0, *)
+public struct InfiniteScrollViewReader<Content: View>: View {
+    @State private var coordinator: InfiniteScrollViewProxyCoordinator
+    @State private var requestVersion = 0
+    private let content: (InfiniteScrollViewProxy) -> Content
+
+    public init(
+        @ViewBuilder content: @escaping (InfiniteScrollViewProxy) -> Content
+    ) {
+        _coordinator = State(initialValue: InfiniteScrollViewProxyCoordinator())
+        self.content = content
+    }
+
+    public var body: some View {
+        content(InfiniteScrollViewProxy(coordinator: coordinator) {
+            requestVersion &+= 1
+        })
+            .environment(\.infiniteScrollViewProxyCoordinator, coordinator)
+            .environment(\.infiniteScrollViewProxyRequestVersion, requestVersion)
+    }
+}
+
 /// SwiftUI InfiniteScrollView component.
 ///
 /// Generic types:
@@ -101,6 +240,9 @@ private final class SelfSizingHostingView<Content: View>: UIView, InfiniteScroll
 /// - ChangeIndex: A type of data that will be given to draw the views and that will be increased and drecreased. It could be for example an Int, a Date or whatever you want.
 @available(iOS 13.0, macOS 10.15, tvOS 13.0, watchOS 6.0, *)
 public struct InfiniteScrollView<Content: View, ChangeIndex> {
+    @Environment(\.infiniteScrollViewProxyCoordinator) private var scrollProxyCoordinator
+    @Environment(\.infiniteScrollViewProxyRequestVersion) private var scrollProxyRequestVersion
+
     #if os(macOS)
     public typealias NSViewType = NSInfiniteScrollView
     public typealias Orientation = NSInfiniteScrollView<ChangeIndex>.Orientation
@@ -111,7 +253,7 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
 
     /// Data that will be passed to draw the view.
     public var changeIndex: ChangeIndex
-    
+
     /// Function called to get the content to display for a particular ChangeIndex.
     public let content: (ChangeIndex) -> Content
 
@@ -144,7 +286,7 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
     /// }
     /// ```
     public let increaseIndexAction: (ChangeIndex) -> ChangeIndex?
-    
+
     /// Function that get the ChangeIndex before another.
     ///
     /// Should return nil if there is no more content to display (end of the ScrollView at the top/left).
@@ -174,18 +316,18 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
     /// }
     /// ```
     public let decreaseIndexAction: (ChangeIndex) -> ChangeIndex?
-    
+
     /// Orientation of the ScrollView
     public let orientation: Orientation
-    
+
     /// Action to do when the user pull the InfiniteScrollView to the top to refresh the content, should be nil if there is no need to refresh anything.
     ///
     /// Gives an action that must be used in order for refresh to end.
     public let refreshAction: ((@escaping () -> Void) -> ())?
-    
+
     /// Space between the views.
     public let spacing: CGFloat
-    
+
     /// Number that will be used to multiply to the view frame height/width so it can scroll.
     ///
     /// Can be used to reduce high-speed scroll lag, set it higher if you need to increment the maximum scroll speed.
@@ -193,6 +335,9 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
 
     /// Boolean that can be changed if the InfiniteScrollView's content needs to be updated.
     public var updateBinding: Binding<Bool>?
+
+    /// Function used to determine whether two indexes identify the same content.
+    public let indexesEqual: ((ChangeIndex, ChangeIndex) -> Bool)?
 
     /// Creates a new instance of InfiniteScrollView
     /// - Parameters:
@@ -225,6 +370,32 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
         self.spacing = spacing
         self.contentMultiplier = contentMultiplier
         self.updateBinding = updateBinding
+        self.indexesEqual = nil
+    }
+
+    /// Creates an InfiniteScrollView with custom index equality.
+    public init(
+        changeIndex: ChangeIndex,
+        increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
+        decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
+        indexesEqual: @escaping (ChangeIndex, ChangeIndex) -> Bool,
+        orientation: Orientation,
+        refreshAction: ((@escaping () -> Void) -> ())? = nil,
+        spacing: CGFloat = 0,
+        contentMultiplier: CGFloat = 6,
+        updateBinding: Binding<Bool>? = nil,
+        @ViewBuilder content: @escaping (ChangeIndex) -> Content
+    ) {
+        self.changeIndex = changeIndex
+        self.content = content
+        self.increaseIndexAction = increaseIndexAction
+        self.decreaseIndexAction = decreaseIndexAction
+        self.indexesEqual = indexesEqual
+        self.orientation = orientation
+        self.refreshAction = refreshAction
+        self.spacing = spacing
+        self.contentMultiplier = contentMultiplier
+        self.updateBinding = updateBinding
     }
 
     #if os(macOS)
@@ -232,17 +403,20 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
         let convertedClosure: (ChangeIndex) -> NSView = { changeIndex in
             SelfSizingHostingView(rootView: content(changeIndex))
         }
-        return NSInfiniteScrollView(
+        let scrollView = NSInfiniteScrollView(
             frame: .zero,
             content: convertedClosure,
             changeIndex: changeIndex,
             changeIndexIncreaseAction: increaseIndexAction,
             changeIndexDecreaseAction: decreaseIndexAction,
+            indexesEqual: indexesEqual,
             contentMultiplier: contentMultiplier,
             orientation: orientation,
             refreshAction: refreshAction,
             spacing: spacing
         )
+        connectProxy(to: scrollView, transaction: context.transaction)
+        return scrollView
     }
 
     @available(macOS 13.0, *)
@@ -264,6 +438,7 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
     }
 
     public func updateNSView(_ nsView: NSInfiniteScrollView<ChangeIndex>, context: Context) {
+        connectProxy(to: nsView, transaction: context.transaction)
         if updateBinding?.wrappedValue ?? false {
             nsView.layout()
             if !Thread.isMainThread {
@@ -275,22 +450,38 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
             }
         }
     }
+
+    private func connectProxy(
+        to scrollView: NSInfiniteScrollView<ChangeIndex>,
+        transaction: Transaction
+    ) {
+        _ = scrollProxyRequestVersion
+        let animated = transaction.animation != nil && !transaction.disablesAnimations
+        scrollProxyCoordinator?.connect(animated: animated) { index, anchor, animated in
+            guard let changeIndex = index as? ChangeIndex else { return .incompatible }
+            scrollView.scroll(to: changeIndex, anchor: anchor, animated: animated)
+            return .handled
+        }
+    }
     #else
     public func makeUIView(context: Context) -> UIInfiniteScrollView<ChangeIndex> {
         let convertedClosure: (ChangeIndex) -> UIView = { changeIndex in
             SelfSizingHostingView(rootView: content(changeIndex))
         }
-        return UIInfiniteScrollView(
+        let scrollView = UIInfiniteScrollView(
             frame: .zero,
             content: convertedClosure,
             changeIndex: changeIndex,
             changeIndexIncreaseAction: increaseIndexAction,
             changeIndexDecreaseAction: decreaseIndexAction,
+            indexesEqual: indexesEqual,
             contentMultiplier: contentMultiplier,
             orientation: orientation,
             refreshAction: refreshAction,
             spacing: spacing
         )
+        connectProxy(to: scrollView, transaction: context.transaction)
+        return scrollView
     }
 
     @available(iOS 16.0, tvOS 16.0, *)
@@ -312,15 +503,56 @@ public struct InfiniteScrollView<Content: View, ChangeIndex> {
     }
 
     public func updateUIView(_ uiView: UIInfiniteScrollView<ChangeIndex>, context: Context) {
+        connectProxy(to: uiView, transaction: context.transaction)
         if updateBinding?.wrappedValue ?? false {
             uiView.layoutSubviews()
             updateBinding?.wrappedValue = false
         }
     }
+
+    private func connectProxy(
+        to scrollView: UIInfiniteScrollView<ChangeIndex>,
+        transaction: Transaction
+    ) {
+        _ = scrollProxyRequestVersion
+        let animated = transaction.animation != nil && !transaction.disablesAnimations
+        scrollProxyCoordinator?.connect(animated: animated) { index, anchor, animated in
+            guard let changeIndex = index as? ChangeIndex else { return .incompatible }
+            scrollView.scroll(to: changeIndex, anchor: anchor, animated: animated)
+            return .handled
+        }
+    }
     #endif
 }
+
+extension InfiniteScrollView where ChangeIndex: Equatable {
+    public init(
+        changeIndex: ChangeIndex,
+        increaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
+        decreaseIndexAction: @escaping (ChangeIndex) -> ChangeIndex?,
+        orientation: Orientation,
+        refreshAction: ((@escaping () -> Void) -> ())? = nil,
+        spacing: CGFloat = 0,
+        contentMultiplier: CGFloat = 6,
+        updateBinding: Binding<Bool>? = nil,
+        @ViewBuilder content: @escaping (ChangeIndex) -> Content
+    ) {
+        self.init(
+            changeIndex: changeIndex,
+            increaseIndexAction: increaseIndexAction,
+            decreaseIndexAction: decreaseIndexAction,
+            indexesEqual: ==,
+            orientation: orientation,
+            refreshAction: refreshAction,
+            spacing: spacing,
+            contentMultiplier: contentMultiplier,
+            updateBinding: updateBinding,
+            content: content
+        )
+    }
+}
 #endif
-    
+
 #if os(macOS)
 extension InfiniteScrollView: NSViewRepresentable {}
 #else
@@ -335,7 +567,6 @@ import AppKit
 /// Generic types:
 /// - ChangeIndex: A type of data that will be given to draw the views and that will be increased and drecreased. It could be for example an Int, a Date or whatever you want.
 public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
-    
     /// Number that will be used to multiply to the view frame height/width so it can scroll.
     ///
     /// Can be used to reduce high-speed scroll lag, set it higher if you need to increment the maximum scroll speed.
@@ -343,7 +574,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
 
     /// Data that will be passed to draw the view.
     private var changeIndex: ChangeIndex
-    
+
     /// Function called to get the content to display for a particular ChangeIndex.
     private let content: (ChangeIndex) -> NSView
 
@@ -376,7 +607,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
     /// }
     /// ```
     private let changeIndexIncreaseAction: (ChangeIndex) -> ChangeIndex?
-    
+
     /// Function that get the ChangeIndex before another.
     ///
     /// Should return nil if there is no more content to display (end of the ScrollView at the top/left).
@@ -406,27 +637,51 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
     /// }
     /// ```
     private let changeIndexDecreaseAction: (ChangeIndex) -> ChangeIndex?
-    
+
+    /// Function used to determine whether two indexes identify the same content.
+    private let indexesEqual: ((ChangeIndex, ChangeIndex) -> Bool)?
+
     /// Orientation of the ScrollView.
     private let orientation: Orientation
-    
+
     /// Action to do when the user pull the InfiniteScrollView to the top to refresh the content, should be nil if there is no need to refresh anything.
     ///
     /// Gives an action that must be used in order for refresh to end.
     public let refreshAction: ((@escaping () -> Void) -> ())?
-    
+
     /// Space between the views.
     private let spacing: CGFloat
-    
+
     /// Array containing the displayed views and their associated data.
     private var visibleLabels: [(NSView, ChangeIndex)]
 
     /// Last viewport length used to constrain content on the cross axis.
     private var lastCrossAxisLength: CGFloat?
 
-    /// A integer indicating whether the NSInfiniteScrollView is doing the layout. Used to prevent infinite recursion when moving the scrollView's offset.
+    /// A counter used to prevent re-entrant layouts while moving the scroll view's offset.
     private var sameTimeLayout: Int = 0
-        
+
+    /// Whether visible content is being replaced by a programmatic scroll.
+    private var isResettingContent = false
+
+    private struct ScrollRequest {
+        let index: ChangeIndex
+        let anchor: InfiniteScrollViewAnchor?
+        let animated: Bool
+    }
+
+    /// A programmatic scroll waiting to be applied during layout.
+    private var pendingScrollRequest: ScrollRequest?
+
+    /// The anchor to apply when the requested view is created.
+    private var pendingScrollAnchor: InfiniteScrollViewAnchor?
+
+    /// Views from the previous position that will animate out.
+    private var outgoingViews = [NSView]()
+
+    /// Whether the newly materialized views should animate in.
+    private var shouldAnimatePendingScroll = false
+
     /// Creates an instance of UIInfiniteScrollView.
     /// - Parameters:
     ///   - frame: Frame of the view.
@@ -444,6 +699,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         changeIndex: ChangeIndex,
         changeIndexIncreaseAction: @escaping (ChangeIndex) -> ChangeIndex?,
         changeIndexDecreaseAction: @escaping (ChangeIndex) -> ChangeIndex?,
+        indexesEqual: ((ChangeIndex, ChangeIndex) -> Bool)? = nil,
         contentMultiplier: CGFloat = 6,
         orientation: Orientation,
         refreshAction: ((@escaping () -> Void) -> ())?,
@@ -455,14 +711,15 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         self.changeIndex = changeIndex
         self.changeIndexIncreaseAction = changeIndexIncreaseAction
         self.changeIndexDecreaseAction = changeIndexDecreaseAction
+        self.indexesEqual = indexesEqual
         self.contentMultiplier = contentMultiplier
         self.orientation = orientation
         self.refreshAction = refreshAction
         self.spacing = spacing
         super.init(frame: frame)
-    
+
         self.documentView = NSView(frame: frame)
-        
+
         /// Increase the size of the ScrollView orientation for the view to be scrollable.
         switch orientation {
         case .horizontal:
@@ -470,24 +727,154 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         case .vertical:
             self.documentSize = CGSizeMake(self.frame.size.width, self.frame.size.height * self.contentMultiplier)
         }
-        
+
         self.translatesAutoresizingMaskIntoConstraints = false
         self.hasVerticalScroller = false
         self.hasHorizontalScroller = false
-        
+
         self.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(layout), name: NSView.boundsDidChangeNotification, object: contentView)
     }
-    
+
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented, please open a PR if you would like it to be implemented")
     }
-    
+
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
-    
+
+    /// Scrolls to an index and positions its content at an anchor.
+    ///
+    /// Set `animated` to true to animate the transition.
+    /// If index equality is configured, a nil anchor does nothing when the item is fully visible,
+    /// and an explicit anchor does nothing when the item is already at that position.
+    public func scroll(
+        to index: ChangeIndex,
+        anchor: InfiniteScrollViewAnchor? = nil,
+        animated: Bool = false
+    ) {
+        guard !isPositioned(index, at: anchor) else { return }
+        pendingScrollRequest = ScrollRequest(index: index, anchor: anchor, animated: animated)
+        lastCrossAxisLength = nil
+        guard bounds.width > 0, bounds.height > 0 else {
+            needsLayout = true
+            return
+        }
+        layout()
+    }
+
+    private func isPositioned(
+        _ index: ChangeIndex,
+        at anchor: InfiniteScrollViewAnchor?
+    ) -> Bool {
+        guard let indexesEqual = indexesEqual else { return false }
+        if let pendingScrollRequest = pendingScrollRequest,
+           pendingScrollRequest.anchor == anchor,
+           indexesEqual(pendingScrollRequest.index, index) {
+            return true
+        }
+        guard let targetView = visibleLabels.first(where: {
+            indexesEqual($0.1, index)
+        })?.0 else {
+            return false
+        }
+
+        let visibleBounds = convert(contentView.bounds, to: self)
+        if anchor == nil {
+            return visibleBounds.contains(targetView.frame)
+        }
+
+        let currentOrigin: CGFloat
+        let expectedOrigin: CGFloat
+        let resolvedAnchor = anchor ?? .leading
+        switch orientation {
+        case .horizontal:
+            currentOrigin = targetView.frame.minX
+            expectedOrigin = anchoredOrigin(
+                minimum: visibleBounds.minX,
+                maximum: visibleBounds.maxX,
+                itemLength: targetView.frame.width,
+                anchor: resolvedAnchor
+            )
+        case .vertical:
+            currentOrigin = targetView.frame.minY
+            expectedOrigin = anchoredOrigin(
+                minimum: visibleBounds.minY,
+                maximum: visibleBounds.maxY,
+                itemLength: targetView.frame.height,
+                anchor: resolvedAnchor
+            )
+        }
+        return abs(currentOrigin - expectedOrigin) <= 0.5
+    }
+
+    private func applyPendingScrollIfNeeded() {
+        guard let request = pendingScrollRequest else { return }
+
+        isResettingContent = true
+        pendingScrollRequest = nil
+        let viewsToRemove = visibleLabels.map(\.0)
+        visibleLabels.removeAll()
+        changeIndex = request.index
+        pendingScrollAnchor = request.anchor ?? .leading
+        shouldAnimatePendingScroll = request.animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if shouldAnimatePendingScroll {
+            outgoingViews = viewsToRemove
+        } else {
+            for view in viewsToRemove {
+                view.removeFromSuperview()
+            }
+        }
+        isResettingContent = false
+    }
+
+    private func animatePendingScrollIfNeeded() {
+        guard shouldAnimatePendingScroll else { return }
+        shouldAnimatePendingScroll = false
+
+        let incomingViews = visibleLabels.map(\.0)
+        let outgoingViews = self.outgoingViews
+        self.outgoingViews.removeAll()
+        let distance: CGFloat
+        let incomingOrigins = incomingViews.map(\.frame.origin)
+        switch orientation {
+        case .horizontal:
+            distance = bounds.width
+            for view in incomingViews {
+                view.frame.origin.x += distance
+            }
+        case .vertical:
+            distance = bounds.height
+            for view in incomingViews {
+                view.frame.origin.y += distance
+            }
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            for view in outgoingViews {
+                var origin = view.frame.origin
+                switch orientation {
+                case .horizontal:
+                    origin.x -= distance
+                case .vertical:
+                    origin.y -= distance
+                }
+                view.animator().setFrameOrigin(origin)
+            }
+            for (view, origin) in zip(incomingViews, incomingOrigins) {
+                view.animator().setFrameOrigin(origin)
+            }
+        } completionHandler: {
+            for view in outgoingViews {
+                view.removeFromSuperview()
+            }
+        }
+    }
+
     /// Recenter content periodically to achieve impression of infinite scrolling
     private func recenterIfNecessary(beforeIndexUndefined: Bool, afterIndexUndefined: Bool) {
         switch orientation {
@@ -496,7 +883,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             let contentWidth: CGFloat = self.documentSize.width
             let centerOffsetX: CGFloat = (contentWidth - self.bounds.size.width) / 2
             let distanceFromCenter: CGFloat = abs(currentOffset.x - centerOffsetX)
-            
+
             if beforeIndexUndefined {
                 self.goLeft()
             } else if afterIndexUndefined {
@@ -504,7 +891,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             } else {
                 if distanceFromCenter > (contentWidth / contentMultiplier) {
                     self.documentOffset = CGPointMake(centerOffsetX, currentOffset.y)
-                    
+
                     /// Move content by the same amount so it appears to stay still.
                     for (label, _) in self.visibleLabels {
                         var center: CGPoint = self.convert(label.center, to: self)
@@ -518,7 +905,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             let contentHeight: CGFloat = self.documentSize.height
             let centerOffsetY: CGFloat = (contentHeight - self.bounds.size.height) / 2
             let distanceFromCenter: CGFloat = abs(currentOffset.y - centerOffsetY)
-            
+
             if beforeIndexUndefined {
                 self.goUp()
             } else if afterIndexUndefined {
@@ -526,7 +913,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             } else {
                 if distanceFromCenter > (contentHeight / contentMultiplier) {
                     self.documentOffset = CGPointMake(currentOffset.x, centerOffsetY)
-                    
+
                     /// Move content by the same amount so it appears to stay still.
                     for (label, _) in self.visibleLabels {
                         var center: CGPoint = self.convert(label.center, to: self)
@@ -537,7 +924,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             }
         }
     }
-    
+
     /// Recenter all the views to the top.
     private func goUp() {
         /// Move content by the same amount so it appears to stay still.
@@ -554,7 +941,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             pointsFromTop += label.frame.height + spacing
         }
     }
-    
+
     /// Recenter all the views to the left.
     private func goLeft() {
         /// Move content by the same amount so it appears to stay still.
@@ -571,7 +958,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             pointsFromLeft += label.frame.width + spacing
         }
     }
-    
+
     /// Recenter all the views to the bottom.
     private func goDown() {
         /// Move content by the same amount so it appears to stay still.
@@ -589,7 +976,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             pointsToTop -= spacing
         }
     }
-    
+
     /// Recenter all the views to the right.
     private func goRight() {
         /// Move content by the same amount so it appears to stay still.
@@ -607,10 +994,13 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             pointsToLeft -= spacing
         }
     }
-        
+
     public override func layout() {
         super.layout()
-        self.sameTimeLayout += 1
+        guard !isResettingContent, sameTimeLayout == 0 else { return }
+        sameTimeLayout += 1
+        defer { sameTimeLayout -= 1 }
+        applyPendingScrollIfNeeded()
         remeasureVisibleViewsIfNeeded()
         /// Get the before and after indexes.
         let beforeIndex = {
@@ -654,23 +1044,23 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             }
             self.recenterIfNecessary(beforeIndexUndefined: beforeIndex == nil, afterIndexUndefined: afterIndex == nil)
         }
-        
+
         switch orientation {
         case .horizontal:
             let visibleBounds: CGRect = self.convert(self.contentView.bounds, to: self)
             let minimumVisibleX: CGFloat = CGRectGetMinX(visibleBounds)
             let maximumVisibleX: CGFloat = CGRectGetMaxX(visibleBounds)
-            
+
             self.redrawViewsX(minimumVisibleX: minimumVisibleX, toMaxX: maximumVisibleX, beforeIndex: beforeIndex, afterIndex: afterIndex, isLittle: isLittle)
         case .vertical:
             let visibleBounds: CGRect = self.convert(self.contentView.bounds, to: self)
             let minimumVisibleY: CGFloat = CGRectGetMinY(visibleBounds)
             let maximumVisibleY: CGFloat = CGRectGetMaxY(visibleBounds)
-            
+
             self.redrawViewsY(minimumVisibleY: minimumVisibleY, toMaxY: maximumVisibleY, beforeIndex: beforeIndex, afterIndex: afterIndex, isLittle: isLittle)
         }
-        
-        self.sameTimeLayout -= 1
+
+        animatePendingScrollIfNeeded()
     }
 
     private func sizeContentView(_ view: NSView) {
@@ -779,86 +1169,86 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         self.documentView?.addSubview(view)
         return view
     }
-    
+
     /// Creates a new view and add it to the end of the ScrollView, returns nil if there is no more content to be displayed.
     private func createAndAppendNewViewToEnd() -> NSView? {
         if let lastchangeIndex = visibleLabels.last {
             guard let newChangeIndex = self.changeIndexIncreaseAction(lastchangeIndex.1) else { return nil }
             changeIndex = newChangeIndex
         }
-        
+
         let newView = self.insertView()
         self.visibleLabels.append((newView, changeIndex))
         return newView
     }
-    
+
     /// Creates and append a new view to the right, returns nil if there is no more content to be displayed.
     private func placeNewViewToRight(rightEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToEnd() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         frame.origin.x = rightEdge
         //        frame.origin.y = 0 // avoid having unaligned elements
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMaxX(frame)
     }
-    
+
     /// Creates and append a new view to the bottom, returns nil if there is no more content to be displayed.
     private func placeNewViewToBottom(bottomEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToEnd() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         //        frame.origin.x = 0 // avoid having unaligned elements
         frame.origin.y = bottomEdge
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMaxY(frame)
     }
-    
+
     /// Creates a new view and add it to the beginning of the ScrollView, returns nil if there is no more content to be displayed.
     private func createAndAppendNewViewToBeginning() -> NSView? {
         if let firstchangeIndex = visibleLabels.first {
             guard let newChangeIndex = self.changeIndexDecreaseAction(firstchangeIndex.1) else { return nil }
             changeIndex = newChangeIndex
         }
-        
+
         let newView = self.insertView()
         self.visibleLabels.insert((newView, changeIndex), at: 0)
         return newView
     }
-    
+
     /// Creates and append a new view to the left, returns nil if there is no more content to be displayed.
     private func placeNewViewToLeft(leftEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToBeginning() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         frame.origin.x = leftEdge - frame.size.width
         //        frame.origin.y = 0 // avoid having unaligned elements
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMinX(frame)
     }
-    
+
     /// Creates and append a new view to the top, returns nil if there is no more content to be displayed.
     private func placeNewViewToTop(topEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToBeginning() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         //        frame.origin.x = 0 // avoid having unaligned elements
         frame.origin.y = topEdge - frame.size.height
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMinY(frame)
     }
-    
+
     /// Add views to the blank screen and removes the ones who aren't displayed anymore.
     private func redrawViewsX(minimumVisibleX: CGFloat, toMaxX maximumVisibleX: CGFloat, beforeIndex: ChangeIndex?, afterIndex: ChangeIndex?, isLittle: Bool) {
-        
+
         /// Checks whether there is any visible view in the ScrollView, if not then it will try to create one.
         if self.visibleLabels.isEmpty {
             if self.placeNewViewToLeft(leftEdge: minimumVisibleX) == nil {
@@ -867,8 +1257,17 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             }
             /// Start with the first element and not the second (as the method shifts the second element to the first position).
             self.visibleLabels.first?.0.frame.origin.x += self.visibleLabels.first?.0.frame.width ?? 0 + spacing
+            if let anchor = pendingScrollAnchor, let targetView = visibleLabels.first?.0 {
+                targetView.frame.origin.x = anchoredOrigin(
+                    minimum: minimumVisibleX,
+                    maximum: maximumVisibleX,
+                    itemLength: targetView.frame.width,
+                    anchor: anchor
+                )
+                pendingScrollAnchor = nil
+            }
         }
-        
+
         /// If beforeIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if beforeIndex != nil, let firstLabel = self.visibleLabels.first?.0 {
             /// Add labels that are missing on left side.
@@ -882,7 +1281,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
                 }
             }
         }
-        
+
         /// If afterIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if afterIndex != nil, let lastLabel = self.visibleLabels.last?.0 {
             /// Add labels that are missing on right side
@@ -898,7 +1297,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
                 }
             }
         }
-        
+
         /// Remove labels that have fallen off right edge (not visible anymore).
         if var lastLabel = self.visibleLabels.last?.0 {
             while (CGRectGetMinX(lastLabel.frame) > maximumVisibleX) {
@@ -908,7 +1307,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
                 lastLabel = newFirstLabel
             }
         }
-        
+
         /// Remove labels that have fallen off left edge (not visible anymore).
         if var firstLabel = self.visibleLabels.first?.0 {
             while (CGRectGetMaxX(firstLabel.frame) < minimumVisibleX) {
@@ -919,9 +1318,9 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             }
         }
     }
-    
+
     private func redrawViewsY(minimumVisibleY: CGFloat, toMaxY maximumVisibleY: CGFloat, beforeIndex: ChangeIndex?, afterIndex: ChangeIndex?, isLittle: Bool) {
-        
+
         /// Checks whether there is any visible view in the ScrollView, if not then it will try to create one.
         if self.visibleLabels.isEmpty {
             if self.placeNewViewToTop(topEdge: minimumVisibleY) == nil {
@@ -930,8 +1329,17 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             }
             /// Start with the first element and not the second (as the method shifts the second element to the first position).
             self.visibleLabels.first?.0.frame.origin.y += self.visibleLabels.first?.0.frame.height ?? 0 + spacing
+            if let anchor = pendingScrollAnchor, let targetView = visibleLabels.first?.0 {
+                targetView.frame.origin.y = anchoredOrigin(
+                    minimum: minimumVisibleY,
+                    maximum: maximumVisibleY,
+                    itemLength: targetView.frame.height,
+                    anchor: anchor
+                )
+                pendingScrollAnchor = nil
+            }
         }
-        
+
         /// If beforeIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if beforeIndex != nil, let firstLabel = self.visibleLabels.first?.0 {
             /// Add labels that are missing on top side.
@@ -945,7 +1353,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
                 }
             }
         }
-        
+
         /// If afterIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if afterIndex != nil, let lastLabel = self.visibleLabels.last?.0 {
             /// Add labels that are missing on bottom side.
@@ -961,7 +1369,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
                 }
             }
         }
-        
+
         /// Remove labels that have fallen off bottom edge.
         if var lastLabel = self.visibleLabels.last?.0 {
             while (CGRectGetMinY(lastLabel.frame) > maximumVisibleY) {
@@ -971,7 +1379,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
                 lastLabel = newLastLabel
             }
         }
-        
+
         /// Remove labels that have fallen off top edge.
         if var firstLabel = self.visibleLabels.first?.0 {
             while (CGRectGetMaxY(firstLabel.frame) < minimumVisibleY) {
@@ -982,7 +1390,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
             }
         }
     }
-    
+
     /// Orientation possibilities of the NSInfiniteScrollView
     public enum Orientation {
         case horizontal
@@ -1016,7 +1424,6 @@ extension NSView {
 /// Generic types:
 /// - ChangeIndex: A type of data that will be given to draw the views and that will be increased and drecreased. It could be for example an Int, a Date or whatever you want.
 public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelegate {
-    
     /// Number that will be used to multiply to the view frame height/width so it can scroll.
     ///
     /// Can be used to reduce high-speed scroll lag, set it higher if you need to increment the maximum scroll speed.
@@ -1024,7 +1431,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
 
     /// Data that will be passed to draw the view.
     private var changeIndex: ChangeIndex
-    
+
     /// Function called to get the content to display for a particular ChangeIndex.
     private let content: (ChangeIndex) -> UIView
 
@@ -1057,7 +1464,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
     /// }
     /// ```
     private let changeIndexIncreaseAction: (ChangeIndex) -> ChangeIndex?
-    
+
     /// Function that get the ChangeIndex before another.
     ///
     /// Should return nil if there is no more content to display (end of the ScrollView at the top/left).
@@ -1087,24 +1494,47 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
     /// }
     /// ```
     private let changeIndexDecreaseAction: (ChangeIndex) -> ChangeIndex?
-    
+
+    /// Function used to determine whether two indexes identify the same content.
+    private let indexesEqual: ((ChangeIndex, ChangeIndex) -> Bool)?
+
     /// Orientation of the ScrollView.
     private let orientation: Orientation
-    
+
     /// Action to do when the user pull the InfiniteScrollView to the top to refresh the content, should be nil if there is no need to refresh anything.
     ///
     /// Gives an action that must be used in order for refresh to end.
     public let refreshAction: ((@escaping () -> Void) -> ())?
-    
+
     /// Space between the views.
     private let spacing: CGFloat
-    
+
     /// Array containing the displayed views and their associated data.
     private var visibleLabels: [(UIView, ChangeIndex)]
-    
 
     /// Last viewport length used to constrain content on the cross axis.
     private var lastCrossAxisLength: CGFloat?
+
+    /// Whether visible content is being replaced by a programmatic scroll.
+    private var isResettingContent = false
+
+    private struct ScrollRequest {
+        let index: ChangeIndex
+        let anchor: InfiniteScrollViewAnchor?
+        let animated: Bool
+    }
+
+    /// A programmatic scroll waiting to be applied during layout.
+    private var pendingScrollRequest: ScrollRequest?
+
+    /// The anchor to apply when the requested view is created.
+    private var pendingScrollAnchor: InfiniteScrollViewAnchor?
+
+    /// Views from the previous position that will animate out.
+    private var outgoingViews = [UIView]()
+
+    /// Whether the newly materialized views should animate in.
+    private var shouldAnimatePendingScroll = false
 
     /// Creates an instance of UIInfiniteScrollView.
     /// - Parameters:
@@ -1123,6 +1553,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         changeIndex: ChangeIndex,
         changeIndexIncreaseAction: @escaping (ChangeIndex) -> ChangeIndex?,
         changeIndexDecreaseAction: @escaping (ChangeIndex) -> ChangeIndex?,
+        indexesEqual: ((ChangeIndex, ChangeIndex) -> Bool)? = nil,
         contentMultiplier: CGFloat = 6,
         orientation: Orientation,
         refreshAction: ((@escaping () -> Void) -> ())?,
@@ -1134,6 +1565,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         self.changeIndex = changeIndex
         self.changeIndexIncreaseAction = changeIndexIncreaseAction
         self.changeIndexDecreaseAction = changeIndexDecreaseAction
+        self.indexesEqual = indexesEqual
         self.contentMultiplier = contentMultiplier
         self.orientation = orientation
         self.refreshAction = refreshAction
@@ -1146,7 +1578,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         case .vertical:
             self.contentSize = CGSizeMake(self.frame.size.width, self.frame.size.height * self.contentMultiplier)
         }
-        
+
         self.translatesAutoresizingMaskIntoConstraints = false
         self.showsHorizontalScrollIndicator = false
         self.showsVerticalScrollIndicator = false
@@ -1155,12 +1587,139 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             self.refreshControl?.addTarget(self, action: #selector(refreshActionMethod), for: .valueChanged)
         }
     }
-    
+
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented, please open a PR if you would like it to be implemented")
     }
-    
+
+    /// Scrolls to an index and positions its content at an anchor.
+    ///
+    /// Set `animated` to true to animate the transition.
+    /// If index equality is configured, a nil anchor does nothing when the item is fully visible,
+    /// and an explicit anchor does nothing when the item is already at that position.
+    public func scroll(
+        to index: ChangeIndex,
+        anchor: InfiniteScrollViewAnchor? = nil,
+        animated: Bool = false
+    ) {
+        guard !isPositioned(index, at: anchor) else { return }
+        pendingScrollRequest = ScrollRequest(index: index, anchor: anchor, animated: animated)
+        lastCrossAxisLength = nil
+        setNeedsLayout()
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        layoutIfNeeded()
+    }
+
+    private func isPositioned(
+        _ index: ChangeIndex,
+        at anchor: InfiniteScrollViewAnchor?
+    ) -> Bool {
+        guard let indexesEqual = indexesEqual else { return false }
+        if let pendingScrollRequest = pendingScrollRequest,
+           pendingScrollRequest.anchor == anchor,
+           indexesEqual(pendingScrollRequest.index, index) {
+            return true
+        }
+        guard let targetView = visibleLabels.first(where: {
+            indexesEqual($0.1, index)
+        })?.0 else {
+            return false
+        }
+
+        let visibleBounds = convert(bounds, to: self)
+        if anchor == nil {
+            return visibleBounds.contains(targetView.frame)
+        }
+
+        let currentOrigin: CGFloat
+        let expectedOrigin: CGFloat
+        let resolvedAnchor = anchor ?? .leading
+        switch orientation {
+        case .horizontal:
+            currentOrigin = targetView.frame.minX
+            expectedOrigin = anchoredOrigin(
+                minimum: visibleBounds.minX,
+                maximum: visibleBounds.maxX,
+                itemLength: targetView.frame.width,
+                anchor: resolvedAnchor
+            )
+        case .vertical:
+            currentOrigin = targetView.frame.minY
+            expectedOrigin = anchoredOrigin(
+                minimum: visibleBounds.minY,
+                maximum: visibleBounds.maxY,
+                itemLength: targetView.frame.height,
+                anchor: resolvedAnchor
+            )
+        }
+        return abs(currentOrigin - expectedOrigin) <= 0.5
+    }
+
+    private func applyPendingScrollIfNeeded() {
+        guard let request = pendingScrollRequest else { return }
+
+        isResettingContent = true
+        pendingScrollRequest = nil
+        let viewsToRemove = visibleLabels.map(\.0)
+        visibleLabels.removeAll()
+        changeIndex = request.index
+        pendingScrollAnchor = request.anchor ?? .leading
+        shouldAnimatePendingScroll = request.animated && !UIAccessibility.isReduceMotionEnabled
+        if shouldAnimatePendingScroll {
+            outgoingViews = viewsToRemove
+        } else {
+            for view in viewsToRemove {
+                view.removeFromSuperview()
+            }
+        }
+        isResettingContent = false
+    }
+
+    private func animatePendingScrollIfNeeded() {
+        guard shouldAnimatePendingScroll else { return }
+        shouldAnimatePendingScroll = false
+
+        let incomingViews = visibleLabels.map(\.0)
+        let outgoingViews = self.outgoingViews
+        self.outgoingViews.removeAll()
+        let distance: CGFloat
+        let incomingTransforms = incomingViews.map(\.transform)
+        let outgoingTransforms = outgoingViews.map(\.transform)
+        let incomingTranslation: CGAffineTransform
+        let outgoingTranslation: CGAffineTransform
+        switch orientation {
+        case .horizontal:
+            distance = bounds.width
+            incomingTranslation = CGAffineTransform(translationX: distance, y: 0)
+            outgoingTranslation = CGAffineTransform(translationX: -distance, y: 0)
+        case .vertical:
+            distance = bounds.height
+            incomingTranslation = CGAffineTransform(translationX: 0, y: distance)
+            outgoingTranslation = CGAffineTransform(translationX: 0, y: -distance)
+        }
+        for (view, transform) in zip(incomingViews, incomingTransforms) {
+            view.transform = transform.concatenating(incomingTranslation)
+        }
+
+        UIView.animate(
+            withDuration: 0.3,
+            delay: 0,
+            options: [.beginFromCurrentState, .curveEaseInOut]
+        ) {
+            for (view, transform) in zip(outgoingViews, outgoingTransforms) {
+                view.transform = transform.concatenating(outgoingTranslation)
+            }
+            for (view, transform) in zip(incomingViews, incomingTransforms) {
+                view.transform = transform
+            }
+        } completion: { _ in
+            for view in outgoingViews {
+                view.removeFromSuperview()
+            }
+        }
+    }
+
     /// Execute the scroll action if it is defined.
     @objc private func refreshActionMethod() {
         if let refreshAction = self.refreshAction, let endAction = self.refreshControl?.endRefreshing {
@@ -1171,7 +1730,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             }
         }
     }
-    
+
     /// Recenter content periodically to achieve impression of infinite scrolling
     private func recenterIfNecessary(beforeIndexUndefined: Bool, afterIndexUndefined: Bool) {
         switch orientation {
@@ -1180,7 +1739,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             let contentWidth: CGFloat = self.contentSize.width
             let centerOffsetX: CGFloat = (contentWidth - self.bounds.size.width) / 2
             let distanceFromCenter: CGFloat = abs(currentOffset.x - centerOffsetX)
-            
+
             if beforeIndexUndefined {
                 self.goLeft()
             } else if afterIndexUndefined {
@@ -1188,7 +1747,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             } else {
                 if distanceFromCenter > (contentWidth / contentMultiplier) {
                     self.contentOffset = CGPointMake(centerOffsetX, currentOffset.y)
-                    
+
                     /// Move content by the same amount so it appears to stay still.
                     for (label, _) in self.visibleLabels {
                         var center: CGPoint = self.convert(label.center, to: self)
@@ -1202,7 +1761,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             let contentHeight: CGFloat = self.contentSize.height
             let centerOffsetY: CGFloat = (contentHeight - self.bounds.size.height) / 2
             let distanceFromCenter: CGFloat = abs(currentOffset.y - centerOffsetY)
-            
+
             if beforeIndexUndefined {
                 self.goUp()
             } else if afterIndexUndefined {
@@ -1210,7 +1769,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             } else {
                 if distanceFromCenter > (contentHeight / contentMultiplier) {
                     self.contentOffset = CGPointMake(currentOffset.x, centerOffsetY)
-                    
+
                     /// Move content by the same amount so it appears to stay still.
                     for (label, _) in self.visibleLabels {
                         var center: CGPoint = self.convert(label.center, to: self)
@@ -1221,7 +1780,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             }
         }
     }
-    
+
     /// Recenter all the views to the top.
     private func goUp() {
         /// Move content by the same amount so it appears to stay still.
@@ -1238,7 +1797,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             pointsFromTop += label.frame.height + spacing
         }
     }
-    
+
     /// Recenter all the views to the left.
     private func goLeft() {
         /// Move content by the same amount so it appears to stay still.
@@ -1255,7 +1814,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             pointsFromLeft += label.frame.width + spacing
         }
     }
-    
+
     /// Recenter all the views to the bottom.
     private func goDown() {
         /// Move content by the same amount so it appears to stay still.
@@ -1273,7 +1832,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             pointsToTop -= spacing
         }
     }
-    
+
     /// Recenter all the views to the right.
     private func goRight() {
         /// Move content by the same amount so it appears to stay still.
@@ -1291,10 +1850,12 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             pointsToLeft -= spacing
         }
     }
-    
-    
+
+
     public override func layoutSubviews() {
         super.layoutSubviews()
+        guard !isResettingContent else { return }
+        applyPendingScrollIfNeeded()
         remeasureVisibleViewsIfNeeded()
         /// Get the before and after indexes.
         let beforeIndex = {
@@ -1338,21 +1899,22 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             }
             self.recenterIfNecessary(beforeIndexUndefined: beforeIndex == nil, afterIndexUndefined: afterIndex == nil)
         }
-        
+
         switch orientation {
         case .horizontal:
             let visibleBounds: CGRect = self.convert(self.bounds, to: self)
             let minimumVisibleX: CGFloat = CGRectGetMinX(visibleBounds)
             let maximumVisibleX: CGFloat = CGRectGetMaxX(visibleBounds)
-            
+
             self.redrawViewsX(minimumVisibleX: minimumVisibleX, toMaxX: maximumVisibleX, beforeIndex: beforeIndex, afterIndex: afterIndex, isLittle: isLittle)
         case .vertical:
             let visibleBounds: CGRect = self.convert(self.bounds, to: self)
             let minimumVisibleY: CGFloat = CGRectGetMinY(visibleBounds)
             let maximumVisibleY: CGFloat = CGRectGetMaxY(visibleBounds)
-            
+
             self.redrawViewsY(minimumVisibleY: minimumVisibleY, toMaxY: maximumVisibleY, beforeIndex: beforeIndex, afterIndex: afterIndex, isLittle: isLittle)
         }
+        animatePendingScrollIfNeeded()
     }
 
     private func sizeContentView(_ view: UIView) {
@@ -1439,86 +2001,86 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         self.addSubview(view)
         return view
     }
-    
+
     /// Creates a new view and add it to the end of the ScrollView, returns nil if there is no more content to be displayed.
     private func createAndAppendNewViewToEnd() -> UIView? {
         if let lastchangeIndex = visibleLabels.last {
             guard let newChangeIndex = self.changeIndexIncreaseAction(lastchangeIndex.1) else { return nil }
             changeIndex = newChangeIndex
         }
-        
+
         let newView = self.insertView()
         self.visibleLabels.append((newView, changeIndex))
         return newView
     }
-    
+
     /// Creates and append a new view to the right, returns nil if there is no more content to be displayed.
     private func placeNewViewToRight(rightEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToEnd() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         frame.origin.x = rightEdge
         //        frame.origin.y = 0 // avoid having unaligned elements
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMaxX(frame)
     }
-    
+
     /// Creates and append a new view to the bottom, returns nil if there is no more content to be displayed.
     private func placeNewViewToBottom(bottomEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToEnd() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         //        frame.origin.x = 0 // avoid having unaligned elements
         frame.origin.y = bottomEdge
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMaxY(frame)
     }
-    
+
     /// Creates a new view and add it to the beginning of the ScrollView, returns nil if there is no more content to be displayed.
     private func createAndAppendNewViewToBeginning() -> UIView? {
         if let firstchangeIndex = visibleLabels.first {
             guard let newChangeIndex = self.changeIndexDecreaseAction(firstchangeIndex.1) else { return nil }
             changeIndex = newChangeIndex
         }
-        
+
         let newView = self.insertView()
         self.visibleLabels.insert((newView, changeIndex), at: 0)
         return newView
     }
-    
+
     /// Creates and append a new view to the left, returns nil if there is no more content to be displayed.
     private func placeNewViewToLeft(leftEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToBeginning() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         frame.origin.x = leftEdge - frame.size.width
         //        frame.origin.y = 0 // avoid having unaligned elements
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMinX(frame)
     }
-    
+
     /// Creates and append a new view to the top, returns nil if there is no more content to be displayed.
     private func placeNewViewToTop(topEdge: CGFloat) -> CGFloat? {
         guard let newView = createAndAppendNewViewToBeginning() else { return nil }
-        
+
         var frame: CGRect = newView.frame
         //        frame.origin.x = 0 // avoid having unaligned elements
         frame.origin.y = topEdge - frame.size.height
-        
+
         newView.frame = frame
-        
+
         return CGRectGetMinY(frame)
     }
-    
+
     /// Add views to the blank screen and removes the ones who aren't displayed anymore.
     private func redrawViewsX(minimumVisibleX: CGFloat, toMaxX maximumVisibleX: CGFloat, beforeIndex: ChangeIndex?, afterIndex: ChangeIndex?, isLittle: Bool) {
-        
+
         /// Checks whether there is any visible view in the ScrollView, if not then it will try to create one.
         if self.visibleLabels.isEmpty {
             if self.placeNewViewToLeft(leftEdge: minimumVisibleX) == nil {
@@ -1527,8 +2089,17 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             }
             /// Start with the first element and not the second (as the method shifts the second element to the first position).
             self.visibleLabels.first?.0.frame.origin.x += self.visibleLabels.first?.0.frame.width ?? 0 + spacing
+            if let anchor = pendingScrollAnchor, let targetView = visibleLabels.first?.0 {
+                targetView.frame.origin.x = anchoredOrigin(
+                    minimum: minimumVisibleX,
+                    maximum: maximumVisibleX,
+                    itemLength: targetView.frame.width,
+                    anchor: anchor
+                )
+                pendingScrollAnchor = nil
+            }
         }
-        
+
         /// If beforeIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if beforeIndex != nil, let firstLabel = self.visibleLabels.first?.0 {
             /// Add labels that are missing on left side.
@@ -1542,7 +2113,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
                 }
             }
         }
-        
+
         /// If afterIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if afterIndex != nil, let lastLabel = self.visibleLabels.last?.0 {
             /// Add labels that are missing on right side
@@ -1558,7 +2129,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
                 }
             }
         }
-        
+
         /// Remove labels that have fallen off right edge (not visible anymore).
         if var lastLabel = self.visibleLabels.last?.0 {
             while (CGRectGetMinX(lastLabel.frame) > maximumVisibleX) {
@@ -1568,7 +2139,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
                 lastLabel = newFirstLabel
             }
         }
-        
+
         /// Remove labels that have fallen off left edge (not visible anymore).
         if var firstLabel = self.visibleLabels.first?.0 {
             while (CGRectGetMaxX(firstLabel.frame) < minimumVisibleX) {
@@ -1579,9 +2150,9 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             }
         }
     }
-    
+
     private func redrawViewsY(minimumVisibleY: CGFloat, toMaxY maximumVisibleY: CGFloat, beforeIndex: ChangeIndex?, afterIndex: ChangeIndex?, isLittle: Bool) {
-        
+
         /// Checks whether there is any visible view in the ScrollView, if not then it will try to create one.
         if self.visibleLabels.isEmpty {
             if self.placeNewViewToTop(topEdge: minimumVisibleY) == nil {
@@ -1590,8 +2161,17 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             }
             /// Start with the first element and not the second (as the method shifts the second element to the first position).
             self.visibleLabels.first?.0.frame.origin.y += self.visibleLabels.first?.0.frame.height ?? 0 + spacing
+            if let anchor = pendingScrollAnchor, let targetView = visibleLabels.first?.0 {
+                targetView.frame.origin.y = anchoredOrigin(
+                    minimum: minimumVisibleY,
+                    maximum: maximumVisibleY,
+                    itemLength: targetView.frame.height,
+                    anchor: anchor
+                )
+                pendingScrollAnchor = nil
+            }
         }
-        
+
         /// If beforeIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if beforeIndex != nil, let firstLabel = self.visibleLabels.first?.0 {
             /// Add labels that are missing on top side.
@@ -1605,7 +2185,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
                 }
             }
         }
-        
+
         /// If afterIndex is nil it means that there is no more content to be displayed, otherwise it will draw and append it.
         if afterIndex != nil, let lastLabel = self.visibleLabels.last?.0 {
             /// Add labels that are missing on bottom side.
@@ -1621,7 +2201,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
                 }
             }
         }
-        
+
         /// Remove labels that have fallen off bottom edge.
         if var lastLabel = self.visibleLabels.last?.0 {
             while (CGRectGetMinY(lastLabel.frame) > maximumVisibleY) {
@@ -1631,7 +2211,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
                 lastLabel = newLastLabel
             }
         }
-        
+
         /// Remove labels that have fallen off top edge.
         if var firstLabel = self.visibleLabels.first?.0 {
             while (CGRectGetMaxY(firstLabel.frame) < minimumVisibleY) {
@@ -1642,7 +2222,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
             }
         }
     }
-    
+
     /// Orientation possibilities of the UIInfiniteScrollView
     public enum Orientation {
         case horizontal
