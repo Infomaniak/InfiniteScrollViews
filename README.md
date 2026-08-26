@@ -93,7 +93,9 @@ InfiniteScrollViewReader { proxy in
 }
 ```
 
-The anchor can be `.leading` (top/left), `.center`, or `.trailing` (bottom/right). It defaults to `nil`: if the item is fully contained in the viewport, nothing happens; otherwise it is placed at the leading edge. Wrapping `scrollTo` in `withAnimation` uses a platform-native slide transition; without it, the jump is immediate. Requests made before the underlying view is ready are applied when it connects.
+The anchor can be `.leading` (top/left), `.center`, or `.trailing` (bottom/right). It defaults to `nil`: a materialized item moves only by the minimum amount needed to become wholly visible. An immediately adjacent missing item is first generated beside the current content, then uses the same minimum-distance behavior. An explicit anchor aligns the corresponding point in the item and viewport. Distant indexes are generated directly at the requested anchor, using `.leading` when the anchor is nil.
+
+Wrapping `scrollTo` in `withAnimation` animates either the native offset adjustment or the direct jump transition; without it, scrolling is immediate. Requests made before the underlying view is ready are applied when it connects.
 
 When `ChangeIndex` conforms to `Equatable`, a request is ignored if that index is already at the requested anchor. For a non-`Equatable` index, provide the `indexesEqual` closure to `InfiniteScrollView` to enable the same behavior.
 

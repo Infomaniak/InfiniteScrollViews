@@ -203,7 +203,7 @@ final class InfiniteScrollViewsTests: XCTestCase {
         scrollView.scroll(to: 42, anchor: .center)
 
         let centeredTargetView = try XCTUnwrap(indexedView(for: 42, in: scrollView))
-        XCTAssertFalse(leadingTargetView === centeredTargetView)
+        XCTAssertTrue(leadingTargetView === centeredTargetView)
         XCTAssertEqual(centeredTargetView.frame.midY, scrollView.documentVisibleRect.midY, accuracy: 0.001)
     }
 
@@ -226,12 +226,112 @@ final class InfiniteScrollViewsTests: XCTestCase {
         scrollView.scroll(to: 42)
         let targetView = try XCTUnwrap(indexedView(for: 42, in: scrollView))
         targetView.frame.origin.y = scrollView.documentVisibleRect.maxY - 1
+        let expectedOffset = targetView.frame.maxY - scrollView.documentVisibleRect.height
 
         scrollView.scroll(to: 42)
 
         let fullyVisibleTargetView = try XCTUnwrap(indexedView(for: 42, in: scrollView))
-        XCTAssertFalse(targetView === fullyVisibleTargetView)
+        XCTAssertTrue(targetView === fullyVisibleTargetView)
+        XCTAssertEqual(scrollView.documentVisibleRect.minY, expectedOffset, accuracy: 0.001)
         XCTAssertTrue(scrollView.documentVisibleRect.contains(fullyVisibleTargetView.frame))
+    }
+
+    func testNilAnchorUsesMinimumMovementForLeadingClipping() throws {
+        let scrollView = makeScrollView(orientation: .vertical)
+        scrollView.layout()
+        scrollView.scroll(to: 42)
+        let targetView = try XCTUnwrap(indexedView(for: 42, in: scrollView))
+        targetView.frame.origin.y = scrollView.documentVisibleRect.minY - 10
+        let expectedOffset = targetView.frame.minY
+
+        scrollView.scroll(to: 42)
+
+        XCTAssertTrue(targetView === indexedView(for: 42, in: scrollView))
+        XCTAssertEqual(scrollView.documentVisibleRect.minY, expectedOffset, accuracy: 0.001)
+    }
+
+    func testExplicitAnchorAlignsMaterializedHorizontalIndex() throws {
+        let scrollView = makeScrollView(orientation: .horizontal)
+        scrollView.layout()
+        scrollView.scroll(to: 42)
+        let targetView = try XCTUnwrap(indexedView(for: 42, in: scrollView))
+
+        scrollView.scroll(to: 42, anchor: .center)
+
+        XCTAssertTrue(targetView === indexedView(for: 42, in: scrollView))
+        XCTAssertEqual(targetView.frame.midX, scrollView.documentVisibleRect.midX, accuracy: 0.001)
+    }
+
+    func testAnimatedNilAnchorScrollsMaterializedIndex() throws {
+        let scrollView = makeScrollView(orientation: .vertical)
+        scrollView.layout()
+        scrollView.scroll(to: 42)
+        let targetView = try XCTUnwrap(indexedView(for: 42, in: scrollView))
+        targetView.frame.origin.y = scrollView.documentVisibleRect.maxY - 1
+
+        scrollView.scroll(to: 42, animated: true)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.35))
+
+        XCTAssertTrue(targetView === indexedView(for: 42, in: scrollView))
+        XCTAssertTrue(scrollView.documentVisibleRect.contains(targetView.frame))
+    }
+
+    func testDecreasingOffsetAnimationDoesNotRecenterMidFlight() throws {
+        let scrollView = makeScrollView(orientation: .vertical)
+        scrollView.layout()
+        scrollView.scroll(to: 42)
+        let targetView = try XCTUnwrap(indexedView(for: 42, in: scrollView))
+        let recenterThreshold = scrollView.bounds.height
+        let centerOffset = (scrollView.documentSize.height - scrollView.bounds.height) / 2
+        let startingOffset = centerOffset - recenterThreshold + 5
+        targetView.frame.origin.y = startingOffset - 10
+        scrollView.documentOffset.y = startingOffset
+        let expectedOffset = targetView.frame.minY
+
+        scrollView.scroll(to: 42, animated: true)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.35))
+
+        XCTAssertEqual(scrollView.documentVisibleRect.minY, expectedOffset, accuracy: 0.001)
+        XCTAssertTrue(targetView === indexedView(for: 42, in: scrollView))
+    }
+
+    func testDecreasingAdjacentIndexUsesMinimumAnimatedDistance() throws {
+        let scrollView = makeScrollView(orientation: .vertical)
+        scrollView.layout()
+        let initialVisibleRect = scrollView.documentVisibleRect
+        let leadingView = try XCTUnwrap(
+            scrollView.documentView?.subviews
+                .compactMap { $0 as? IndexedView }
+                .min { $0.frame.minY < $1.frame.minY }
+        )
+        let requestedIndex = leadingView.index - 1
+
+        scrollView.scroll(to: requestedIndex, animated: true)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.35))
+
+        let targetView = try XCTUnwrap(indexedView(for: requestedIndex, in: scrollView))
+        let distance = abs(scrollView.documentVisibleRect.minY - initialVisibleRect.minY)
+        XCTAssertLessThan(distance, initialVisibleRect.height)
+        XCTAssertTrue(scrollView.documentVisibleRect.contains(targetView.frame))
+    }
+
+    func testIncreasingAdjacentIndexUsesMinimumDistance() throws {
+        let scrollView = makeScrollView(orientation: .vertical)
+        scrollView.layout()
+        let initialVisibleRect = scrollView.documentVisibleRect
+        let trailingView = try XCTUnwrap(
+            scrollView.documentView?.subviews
+                .compactMap { $0 as? IndexedView }
+                .max { $0.frame.maxY < $1.frame.maxY }
+        )
+        let requestedIndex = trailingView.index + 1
+
+        scrollView.scroll(to: requestedIndex)
+
+        let targetView = try XCTUnwrap(indexedView(for: requestedIndex, in: scrollView))
+        let distance = abs(scrollView.documentVisibleRect.minY - initialVisibleRect.minY)
+        XCTAssertLessThan(distance, initialVisibleRect.height)
+        XCTAssertTrue(scrollView.documentVisibleRect.contains(targetView.frame))
     }
 
     func testScrollToIndexWaitsForAValidViewport() throws {

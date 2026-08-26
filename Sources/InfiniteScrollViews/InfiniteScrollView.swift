@@ -61,6 +61,49 @@ private func anchoredOrigin(
     minimum + CGFloat(anchor.unitOffset) * (maximum - minimum - itemLength)
 }
 
+private func targetViewportOrigin(
+    currentOrigin: CGFloat,
+    viewportLength: CGFloat,
+    itemOrigin: CGFloat,
+    itemLength: CGFloat,
+    anchor: InfiniteScrollViewAnchor?
+) -> CGFloat? {
+    let targetOrigin: CGFloat
+    if let anchor {
+        targetOrigin = itemOrigin - CGFloat(anchor.unitOffset) * (viewportLength - itemLength)
+    } else {
+        let currentMaximum = currentOrigin + viewportLength
+        let itemMaximum = itemOrigin + itemLength
+        if itemOrigin >= currentOrigin && itemMaximum <= currentMaximum {
+            return nil
+        } else if itemLength <= viewportLength {
+            targetOrigin = itemOrigin < currentOrigin ? itemOrigin : itemMaximum - viewportLength
+        } else {
+            let leadingOrigin = itemOrigin
+            let trailingOrigin = itemMaximum - viewportLength
+            targetOrigin = abs(leadingOrigin - currentOrigin) <= abs(trailingOrigin - currentOrigin)
+                ? leadingOrigin
+                : trailingOrigin
+        }
+    }
+
+    return abs(targetOrigin - currentOrigin) <= 0.5 ? nil : targetOrigin
+}
+
+private enum InfiniteScrollAnimationDirection {
+    case increasing
+    case decreasing
+
+    var multiplier: CGFloat {
+        switch self {
+        case .increasing:
+            return 1
+        case .decreasing:
+            return -1
+        }
+    }
+}
+
 #if canImport(SwiftUI)
 import SwiftUI
 
@@ -668,6 +711,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         let index: ChangeIndex
         let anchor: InfiniteScrollViewAnchor?
         let animated: Bool
+        let animationDirection: InfiniteScrollAnimationDirection
     }
 
     /// A programmatic scroll waiting to be applied during layout.
@@ -681,6 +725,15 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
 
     /// Whether the newly materialized views should animate in.
     private var shouldAnimatePendingScroll = false
+
+    /// Direction used by the pending direct-jump transition.
+    private var pendingScrollAnimationDirection = InfiniteScrollAnimationDirection.increasing
+
+    /// Whether a materialized target is currently animating by changing the viewport offset.
+    private var isProgrammaticOffsetAnimationActive = false
+
+    /// Identifies the latest viewport-offset animation.
+    private var offsetAnimationGeneration = 0
 
     /// Creates an instance of UIInfiniteScrollView.
     /// - Parameters:
@@ -748,15 +801,31 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
     /// Scrolls to an index and positions its content at an anchor.
     ///
     /// Set `animated` to true to animate the transition.
-    /// If index equality is configured, a nil anchor does nothing when the item is fully visible,
-    /// and an explicit anchor does nothing when the item is already at that position.
+    /// If the item is materialized, a nil anchor scrolls the minimum amount needed to make it
+    /// fully visible, while an explicit anchor aligns the corresponding item and viewport points.
     public func scroll(
         to index: ChangeIndex,
         anchor: InfiniteScrollViewAnchor? = nil,
         animated: Bool = false
     ) {
-        guard !isPositioned(index, at: anchor) else { return }
-        pendingScrollRequest = ScrollRequest(index: index, anchor: anchor, animated: animated)
+        if let pendingScrollRequest = pendingScrollRequest,
+           pendingScrollRequest.anchor == anchor,
+           indexesEqual?(pendingScrollRequest.index, index) == true {
+            return
+        }
+        if scrollMaterializedItem(to: index, anchor: anchor, animated: animated) {
+            return
+        }
+        if materializeAdjacentItem(at: index),
+           scrollMaterializedItem(to: index, anchor: anchor, animated: animated) {
+            return
+        }
+        pendingScrollRequest = ScrollRequest(
+            index: index,
+            anchor: anchor,
+            animated: animated,
+            animationDirection: animationDirection(to: index)
+        )
         lastCrossAxisLength = nil
         guard bounds.width > 0, bounds.height > 0 else {
             needsLayout = true
@@ -765,49 +834,115 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         layout()
     }
 
-    private func isPositioned(
-        _ index: ChangeIndex,
-        at anchor: InfiniteScrollViewAnchor?
+    private func materializeAdjacentItem(at index: ChangeIndex) -> Bool {
+        guard let indexesEqual = indexesEqual,
+              let firstLabel = visibleLabels.first,
+              let lastLabel = visibleLabels.last else {
+            return false
+        }
+
+        if let previousIndex = changeIndexDecreaseAction(firstLabel.1),
+           indexesEqual(previousIndex, index) {
+            switch orientation {
+            case .horizontal:
+                return placeNewViewToLeft(
+                    leftEdge: firstLabel.0.frame.minX - spacing
+                ) != nil
+            case .vertical:
+                return placeNewViewToTop(
+                    topEdge: firstLabel.0.frame.minY - spacing
+                ) != nil
+            }
+        }
+
+        if let nextIndex = changeIndexIncreaseAction(lastLabel.1),
+           indexesEqual(nextIndex, index) {
+            switch orientation {
+            case .horizontal:
+                return placeNewViewToRight(
+                    rightEdge: lastLabel.0.frame.maxX + spacing
+                ) != nil
+            case .vertical:
+                return placeNewViewToBottom(
+                    bottomEdge: lastLabel.0.frame.maxY + spacing
+                ) != nil
+            }
+        }
+        return false
+    }
+
+    private func scrollMaterializedItem(
+        to index: ChangeIndex,
+        anchor: InfiniteScrollViewAnchor?,
+        animated: Bool
     ) -> Bool {
         guard let indexesEqual = indexesEqual else { return false }
-        if let pendingScrollRequest = pendingScrollRequest,
-           pendingScrollRequest.anchor == anchor,
-           indexesEqual(pendingScrollRequest.index, index) {
-            return true
-        }
         guard let targetView = visibleLabels.first(where: {
             indexesEqual($0.1, index)
         })?.0 else {
             return false
         }
 
-        let visibleBounds = convert(contentView.bounds, to: self)
-        if anchor == nil {
-            return visibleBounds.contains(targetView.frame)
-        }
-
-        let currentOrigin: CGFloat
-        let expectedOrigin: CGFloat
-        let resolvedAnchor = anchor ?? .leading
+        let visibleBounds = documentVisibleRect
+        let targetOrigin: CGFloat?
         switch orientation {
         case .horizontal:
-            currentOrigin = targetView.frame.minX
-            expectedOrigin = anchoredOrigin(
-                minimum: visibleBounds.minX,
-                maximum: visibleBounds.maxX,
+            targetOrigin = targetViewportOrigin(
+                currentOrigin: visibleBounds.minX,
+                viewportLength: visibleBounds.width,
+                itemOrigin: targetView.frame.minX,
                 itemLength: targetView.frame.width,
-                anchor: resolvedAnchor
+                anchor: anchor
             )
         case .vertical:
-            currentOrigin = targetView.frame.minY
-            expectedOrigin = anchoredOrigin(
-                minimum: visibleBounds.minY,
-                maximum: visibleBounds.maxY,
+            targetOrigin = targetViewportOrigin(
+                currentOrigin: visibleBounds.minY,
+                viewportLength: visibleBounds.height,
+                itemOrigin: targetView.frame.minY,
                 itemLength: targetView.frame.height,
-                anchor: resolvedAnchor
+                anchor: anchor
             )
         }
-        return abs(currentOrigin - expectedOrigin) <= 0.5
+        guard let targetOrigin else { return true }
+
+        var offset = documentOffset
+        switch orientation {
+        case .horizontal:
+            offset.x = targetOrigin
+        case .vertical:
+            offset.y = targetOrigin
+        }
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            offsetAnimationGeneration &+= 1
+            let animationGeneration = offsetAnimationGeneration
+            isProgrammaticOffsetAnimationActive = true
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.3
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                contentView.animator().setBoundsOrigin(offset)
+            } completionHandler: { [weak self] in
+                guard let self = self,
+                      self.offsetAnimationGeneration == animationGeneration else {
+                    return
+                }
+                self.isProgrammaticOffsetAnimationActive = false
+                self.needsLayout = true
+            }
+        } else {
+            offsetAnimationGeneration &+= 1
+            isProgrammaticOffsetAnimationActive = false
+            documentOffset = offset
+        }
+        return true
+    }
+
+    private func animationDirection(to index: ChangeIndex) -> InfiniteScrollAnimationDirection {
+        guard let indexesEqual = indexesEqual,
+              let firstIndex = visibleLabels.first?.1,
+              let previousIndex = changeIndexDecreaseAction(firstIndex) else {
+            return .increasing
+        }
+        return indexesEqual(previousIndex, index) ? .decreasing : .increasing
     }
 
     private func applyPendingScrollIfNeeded() {
@@ -819,6 +954,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         visibleLabels.removeAll()
         changeIndex = request.index
         pendingScrollAnchor = request.anchor ?? .leading
+        pendingScrollAnimationDirection = request.animationDirection
         shouldAnimatePendingScroll = request.animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if shouldAnimatePendingScroll {
             outgoingViews = viewsToRemove
@@ -838,17 +974,18 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
         let outgoingViews = self.outgoingViews
         self.outgoingViews.removeAll()
         let distance: CGFloat
+        let directionMultiplier = pendingScrollAnimationDirection.multiplier
         let incomingOrigins = incomingViews.map(\.frame.origin)
         switch orientation {
         case .horizontal:
             distance = bounds.width
             for view in incomingViews {
-                view.frame.origin.x += distance
+                view.frame.origin.x += distance * directionMultiplier
             }
         case .vertical:
             distance = bounds.height
             for view in incomingViews {
-                view.frame.origin.y += distance
+                view.frame.origin.y += distance * directionMultiplier
             }
         }
 
@@ -859,9 +996,9 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
                 var origin = view.frame.origin
                 switch orientation {
                 case .horizontal:
-                    origin.x -= distance
+                    origin.x -= distance * directionMultiplier
                 case .vertical:
-                    origin.y -= distance
+                    origin.y -= distance * directionMultiplier
                 }
                 view.animator().setFrameOrigin(origin)
             }
@@ -877,6 +1014,7 @@ public class NSInfiniteScrollView<ChangeIndex>: NSScrollView {
 
     /// Recenter content periodically to achieve impression of infinite scrolling
     private func recenterIfNecessary(beforeIndexUndefined: Bool, afterIndexUndefined: Bool) {
+        guard !isProgrammaticOffsetAnimationActive else { return }
         switch orientation {
         case .horizontal:
             let currentOffset: CGPoint = self.documentOffset
@@ -1522,6 +1660,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         let index: ChangeIndex
         let anchor: InfiniteScrollViewAnchor?
         let animated: Bool
+        let animationDirection: InfiniteScrollAnimationDirection
     }
 
     /// A programmatic scroll waiting to be applied during layout.
@@ -1535,6 +1674,15 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
 
     /// Whether the newly materialized views should animate in.
     private var shouldAnimatePendingScroll = false
+
+    /// Direction used by the pending direct-jump transition.
+    private var pendingScrollAnimationDirection = InfiniteScrollAnimationDirection.increasing
+
+    /// Whether a materialized target is currently animating by changing the viewport offset.
+    private var isProgrammaticOffsetAnimationActive = false
+
+    /// Identifies the latest viewport-offset animation.
+    private var offsetAnimationGeneration = 0
 
     /// Creates an instance of UIInfiniteScrollView.
     /// - Parameters:
@@ -1596,64 +1744,149 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
     /// Scrolls to an index and positions its content at an anchor.
     ///
     /// Set `animated` to true to animate the transition.
-    /// If index equality is configured, a nil anchor does nothing when the item is fully visible,
-    /// and an explicit anchor does nothing when the item is already at that position.
+    /// If the item is materialized, a nil anchor scrolls the minimum amount needed to make it
+    /// fully visible, while an explicit anchor aligns the corresponding item and viewport points.
     public func scroll(
         to index: ChangeIndex,
         anchor: InfiniteScrollViewAnchor? = nil,
         animated: Bool = false
     ) {
-        guard !isPositioned(index, at: anchor) else { return }
-        pendingScrollRequest = ScrollRequest(index: index, anchor: anchor, animated: animated)
+        if let pendingScrollRequest = pendingScrollRequest,
+           pendingScrollRequest.anchor == anchor,
+           indexesEqual?(pendingScrollRequest.index, index) == true {
+            return
+        }
+        if scrollMaterializedItem(to: index, anchor: anchor, animated: animated) {
+            return
+        }
+        if materializeAdjacentItem(at: index),
+           scrollMaterializedItem(to: index, anchor: anchor, animated: animated) {
+            return
+        }
+        pendingScrollRequest = ScrollRequest(
+            index: index,
+            anchor: anchor,
+            animated: animated,
+            animationDirection: animationDirection(to: index)
+        )
         lastCrossAxisLength = nil
         setNeedsLayout()
         guard bounds.width > 0, bounds.height > 0 else { return }
         layoutIfNeeded()
     }
 
-    private func isPositioned(
-        _ index: ChangeIndex,
-        at anchor: InfiniteScrollViewAnchor?
+    private func materializeAdjacentItem(at index: ChangeIndex) -> Bool {
+        guard let indexesEqual = indexesEqual,
+              let firstLabel = visibleLabels.first,
+              let lastLabel = visibleLabels.last else {
+            return false
+        }
+
+        if let previousIndex = changeIndexDecreaseAction(firstLabel.1),
+           indexesEqual(previousIndex, index) {
+            switch orientation {
+            case .horizontal:
+                return placeNewViewToLeft(
+                    leftEdge: firstLabel.0.frame.minX - spacing
+                ) != nil
+            case .vertical:
+                return placeNewViewToTop(
+                    topEdge: firstLabel.0.frame.minY - spacing
+                ) != nil
+            }
+        }
+
+        if let nextIndex = changeIndexIncreaseAction(lastLabel.1),
+           indexesEqual(nextIndex, index) {
+            switch orientation {
+            case .horizontal:
+                return placeNewViewToRight(
+                    rightEdge: lastLabel.0.frame.maxX + spacing
+                ) != nil
+            case .vertical:
+                return placeNewViewToBottom(
+                    bottomEdge: lastLabel.0.frame.maxY + spacing
+                ) != nil
+            }
+        }
+        return false
+    }
+
+    private func scrollMaterializedItem(
+        to index: ChangeIndex,
+        anchor: InfiniteScrollViewAnchor?,
+        animated: Bool
     ) -> Bool {
         guard let indexesEqual = indexesEqual else { return false }
-        if let pendingScrollRequest = pendingScrollRequest,
-           pendingScrollRequest.anchor == anchor,
-           indexesEqual(pendingScrollRequest.index, index) {
-            return true
-        }
         guard let targetView = visibleLabels.first(where: {
             indexesEqual($0.1, index)
         })?.0 else {
             return false
         }
 
-        let visibleBounds = convert(bounds, to: self)
-        if anchor == nil {
-            return visibleBounds.contains(targetView.frame)
-        }
-
-        let currentOrigin: CGFloat
-        let expectedOrigin: CGFloat
-        let resolvedAnchor = anchor ?? .leading
+        let visibleBounds = bounds
+        let targetOrigin: CGFloat?
         switch orientation {
         case .horizontal:
-            currentOrigin = targetView.frame.minX
-            expectedOrigin = anchoredOrigin(
-                minimum: visibleBounds.minX,
-                maximum: visibleBounds.maxX,
+            targetOrigin = targetViewportOrigin(
+                currentOrigin: visibleBounds.minX,
+                viewportLength: visibleBounds.width,
+                itemOrigin: targetView.frame.minX,
                 itemLength: targetView.frame.width,
-                anchor: resolvedAnchor
+                anchor: anchor
             )
         case .vertical:
-            currentOrigin = targetView.frame.minY
-            expectedOrigin = anchoredOrigin(
-                minimum: visibleBounds.minY,
-                maximum: visibleBounds.maxY,
+            targetOrigin = targetViewportOrigin(
+                currentOrigin: visibleBounds.minY,
+                viewportLength: visibleBounds.height,
+                itemOrigin: targetView.frame.minY,
                 itemLength: targetView.frame.height,
-                anchor: resolvedAnchor
+                anchor: anchor
             )
         }
-        return abs(currentOrigin - expectedOrigin) <= 0.5
+        guard let targetOrigin else { return true }
+
+        var offset = contentOffset
+        switch orientation {
+        case .horizontal:
+            offset.x = targetOrigin
+        case .vertical:
+            offset.y = targetOrigin
+        }
+        if animated && !UIAccessibility.isReduceMotionEnabled {
+            offsetAnimationGeneration &+= 1
+            let animationGeneration = offsetAnimationGeneration
+            isProgrammaticOffsetAnimationActive = true
+            UIView.animate(
+                withDuration: 0.3,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseInOut]
+            ) {
+                self.contentOffset = offset
+            } completion: { [weak self] _ in
+                guard let self = self,
+                      self.offsetAnimationGeneration == animationGeneration else {
+                    return
+                }
+                self.isProgrammaticOffsetAnimationActive = false
+                self.setNeedsLayout()
+                self.layoutIfNeeded()
+            }
+        } else {
+            offsetAnimationGeneration &+= 1
+            isProgrammaticOffsetAnimationActive = false
+            contentOffset = offset
+        }
+        return true
+    }
+
+    private func animationDirection(to index: ChangeIndex) -> InfiniteScrollAnimationDirection {
+        guard let indexesEqual = indexesEqual,
+              let firstIndex = visibleLabels.first?.1,
+              let previousIndex = changeIndexDecreaseAction(firstIndex) else {
+            return .increasing
+        }
+        return indexesEqual(previousIndex, index) ? .decreasing : .increasing
     }
 
     private func applyPendingScrollIfNeeded() {
@@ -1665,6 +1898,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         visibleLabels.removeAll()
         changeIndex = request.index
         pendingScrollAnchor = request.anchor ?? .leading
+        pendingScrollAnimationDirection = request.animationDirection
         shouldAnimatePendingScroll = request.animated && !UIAccessibility.isReduceMotionEnabled
         if shouldAnimatePendingScroll {
             outgoingViews = viewsToRemove
@@ -1684,6 +1918,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         let outgoingViews = self.outgoingViews
         self.outgoingViews.removeAll()
         let distance: CGFloat
+        let directionMultiplier = pendingScrollAnimationDirection.multiplier
         let incomingTransforms = incomingViews.map(\.transform)
         let outgoingTransforms = outgoingViews.map(\.transform)
         let incomingTranslation: CGAffineTransform
@@ -1691,12 +1926,24 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
         switch orientation {
         case .horizontal:
             distance = bounds.width
-            incomingTranslation = CGAffineTransform(translationX: distance, y: 0)
-            outgoingTranslation = CGAffineTransform(translationX: -distance, y: 0)
+            incomingTranslation = CGAffineTransform(
+                translationX: distance * directionMultiplier,
+                y: 0
+            )
+            outgoingTranslation = CGAffineTransform(
+                translationX: -distance * directionMultiplier,
+                y: 0
+            )
         case .vertical:
             distance = bounds.height
-            incomingTranslation = CGAffineTransform(translationX: 0, y: distance)
-            outgoingTranslation = CGAffineTransform(translationX: 0, y: -distance)
+            incomingTranslation = CGAffineTransform(
+                translationX: 0,
+                y: distance * directionMultiplier
+            )
+            outgoingTranslation = CGAffineTransform(
+                translationX: 0,
+                y: -distance * directionMultiplier
+            )
         }
         for (view, transform) in zip(incomingViews, incomingTransforms) {
             view.transform = transform.concatenating(incomingTranslation)
@@ -1733,6 +1980,7 @@ public class UIInfiniteScrollView<ChangeIndex>: UIScrollView, UIScrollViewDelega
 
     /// Recenter content periodically to achieve impression of infinite scrolling
     private func recenterIfNecessary(beforeIndexUndefined: Bool, afterIndexUndefined: Bool) {
+        guard !isProgrammaticOffsetAnimationActive else { return }
         switch orientation {
         case .horizontal:
             let currentOffset: CGPoint = self.contentOffset
