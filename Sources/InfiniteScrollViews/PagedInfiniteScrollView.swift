@@ -378,7 +378,9 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
             return hostingController
         }
         let changeIndexNotification: (ChangeIndex) -> () = { changeIndex in
-            self.changeIndex.wrappedValue = changeIndex
+            DispatchQueue.main.async {
+                self.changeIndex.wrappedValue = changeIndex
+            }
         }
         let pageViewController = UIPagedInfiniteScrollView(content: convertedClosure, changeIndex: changeIndex.wrappedValue, changeIndexNotification: changeIndexNotification, increaseIndexAction: increaseIndexAction, decreaseIndexAction: decreaseIndexAction, transitionStyle: transitionStyle, navigationOrientation: navigationOrientation, backgroundColor: backgroundColor)
         
@@ -391,6 +393,10 @@ public struct PagedInfiniteScrollView<Content: View, ChangeIndex> {
 
         if let backgroundColor {
             uiViewController.view.backgroundColor = backgroundColor
+        }
+
+        guard !uiViewController.isUserTransitionInProgress else {
+            return
         }
         
         /// Check if the view should update and if it should then it will be.
@@ -870,6 +876,14 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
     /// ```
     var decreaseIndexAction: (ChangeIndex) -> ChangeIndex?
 
+    fileprivate private(set) var isUserTransitionInProgress = false
+    private weak var pagingScrollView: UIScrollView?
+    private var contentOffsetObservation: NSKeyValueObservation?
+    private var transitionStartIndex: ChangeIndex?
+    private var transitionTargetIndex: ChangeIndex?
+    private var transitionStartContentOffset: CGPoint?
+    private var hasCrossedTransitionThreshold = false
+
     /// Creates an instance of UIPagedInfiniteScrollView.
     /// - Parameters:
     ///   - content: Function called to get the content to display for a particular ChangeIndex.
@@ -915,6 +929,11 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
             animated: false
         )
     }
+
+    public override func viewDidLoad() {
+        super.viewDidLoad()
+        observePagingScrollView()
+    }
     
     @available(*, unavailable)
     required init?(coder: NSCoder) {
@@ -946,14 +965,85 @@ public class UIPagedInfiniteScrollView<ChangeIndex>: UIPageViewController, UIPag
         }
         return nil
     }
+
+    public func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
+        guard let pendingViewController = pendingViewControllers.first as? CurrentIndexProviding,
+              let pendingIndex = pendingViewController.erasedCurrentIndex as? ChangeIndex,
+              let currentViewController = pageViewController.viewControllers?.first as? CurrentIndexProviding,
+              let currentIndex = currentViewController.erasedCurrentIndex as? ChangeIndex else {
+            return
+        }
+
+        observePagingScrollView()
+        isUserTransitionInProgress = true
+        transitionStartIndex = currentIndex
+        transitionTargetIndex = pendingIndex
+        transitionStartContentOffset = pagingScrollView?.contentOffset
+        hasCrossedTransitionThreshold = false
+    }
     
     public func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
-        /// Check if the transition was successful and update the changeIndex of the class.
-        if completed,
-           let currentViewController = pageViewController.viewControllers?.first as? CurrentIndexProviding,
+        defer {
+            resetTransition()
+        }
+
+        guard completed != hasCrossedTransitionThreshold else {
+            return
+        }
+
+        if let currentViewController = pageViewController.viewControllers?.first as? CurrentIndexProviding,
            let currentIndex = currentViewController.erasedCurrentIndex as? ChangeIndex {
             changeIndex = currentIndex
         }
+    }
+
+    private func observePagingScrollView() {
+        guard pagingScrollView == nil,
+              let scrollView = view.subviews.first(where: { $0 is UIScrollView }) as? UIScrollView else {
+            return
+        }
+
+        pagingScrollView = scrollView
+        contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+            self?.updateIndexIfNeeded()
+        }
+    }
+
+    private func updateIndexIfNeeded() {
+        guard isUserTransitionInProgress,
+              let scrollView = pagingScrollView,
+              let startContentOffset = transitionStartContentOffset,
+              let startIndex = transitionStartIndex,
+              let targetIndex = transitionTargetIndex else {
+            return
+        }
+
+        let offset = navigationOrientation == .horizontal
+            ? abs(scrollView.contentOffset.x - startContentOffset.x)
+            : abs(scrollView.contentOffset.y - startContentOffset.y)
+        let pageLength = navigationOrientation == .horizontal
+            ? scrollView.bounds.width
+            : scrollView.bounds.height
+
+        guard pageLength > 0 else {
+            return
+        }
+
+        let hasCrossedThreshold = offset > pageLength / 2
+        guard hasCrossedThreshold != hasCrossedTransitionThreshold else {
+            return
+        }
+
+        hasCrossedTransitionThreshold = hasCrossedThreshold
+        changeIndex = hasCrossedThreshold ? targetIndex : startIndex
+    }
+
+    private func resetTransition() {
+        isUserTransitionInProgress = false
+        transitionStartIndex = nil
+        transitionTargetIndex = nil
+        transitionStartContentOffset = nil
+        hasCrossedTransitionThreshold = false
     }
 }
 #endif
